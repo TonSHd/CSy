@@ -2,7 +2,7 @@
 
 > "CSy is like python and C++ split custody"
 
-CSy is an AI focused compiled language built to make AI development less
+CSy is an open source AI focused compiled language built to make AI development less
 painful: concise, readable syntax, direct control over model architecture
 and performance aimed at matching C++ on suitable workloads. The long term
 goal is to make common AI work POTENTIALLY easier than Python without hiding the
@@ -51,11 +51,9 @@ Statements end with `;`. A missing one is only a warning, but write it.
 ```
 #inc basic as bc;
 
-func greet(name):
-    rt "hi " + name;
-::ext
+using bc::out as say;
 
-bc::out>greet("CSy");
+say>"hello"
 ```
 
 `csyc build` reads `project.csp` in the current directory. Pass a different
