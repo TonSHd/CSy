@@ -28,6 +28,36 @@ Then you can run
 ./csyc install
 ```
 
+`csyc install` puts csyc in `/usr/bin` and the Cooler Compiler table in `/usr/share/csyc`.
+CMake and the tarball's `install.sh` use `/usr` too. If an older `csyc` sits earlier on
+your PATH (for example in `/usr/local/bin`), `csyc install` and `csyc doctor` tell you which
+one runs and the exact `rm` command to remove it. Afterwards run `hash -r` or open a new
+terminal.
+
+## Quick start
+
+```bash
+csyc init myapp
+cd myapp
+csyc build
+csyc run src/main.cso
+```
+
+`csyc init` makes `project.csp`, `src/main.csy` and a `.gitignore`. A single file
+also works without a project: `csyc hello.csy`.
+
+Statements end with `;`. A missing one is only a warning, but write it.
+
+```
+#inc basic as bc;
+
+func greet(name):
+    rt "hi " + name;
+::ext
+
+bc::out>greet("CSy");
+```
+
 `csyc build` reads `project.csp` in the current directory. Pass a different
 `.csp` path to select another project. If its `output` is omitted, the build
 writes a `.cso` beside the entry source. A source build without `-o` also writes
@@ -36,9 +66,46 @@ file. `csyc run name.cso` rebuilds when a matching `name.csy` is newer; when the
 artifact matches the current directory's `project.csp` it checks the loaded
 project sources as well. Otherwise it runs the existing object.
 
-Not gonna brag but you can alias almost everything in CSy using "as, using"
+What makes us special is...
+We got a feature that can solves coding problem
+Such as explaining how the code works on a specific part using "csyc explain"
+There's more but i won't bloat README.md just to explain how features work. It's not the right place.
 
-You can learn everything in our learning document in CSY_SYNTAX_REFERENCE.md!
+Not gonna brag but you can alias almost everything in CSy using "as, using"
+You can customize how you code.
+
+a simple example:
+
+#inc basic as bc;
+
+using bc::out as o;
+
+o>"hello";
+
+yes. its that simple.
+
+you can do more than this:
+
+#inc basic as bc;
+
+using #inc as import;
+import basic as me;
+
+using me::out as say;
+
+say>"hello";
+
+Other things CSy has that are easy to miss:
+
+- classes with inheritance: `class Dog(name) extends Animal(name):`
+- error handling with `try` and `catch e:`
+- several files in one program with `#connect "lib/math.csy";`
+- the Cooler Compiler, which stays off until you run `csyc enable ccm`
+
+One thing that trips people: printing a comparison needs parentheses.
+`o>(x == 5);` prints the result, `o>x == 5;` prints nothing.
+
+You can learn everything including features in our learning document in CSY_SYNTAX_REFERENCE.md!
 CSy was still in early version (1.0.0) so you might encounter weird stuff.
 But don't just ignore it! Tell us in issues
 

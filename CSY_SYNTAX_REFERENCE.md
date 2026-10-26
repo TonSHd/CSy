@@ -265,6 +265,41 @@ model = Model("DemoNet");
 model::initialize();
 ```
 
+### Inheritance (extends)
+
+A class can extend another class. Write the base class and the arguments it should
+receive after `extends`:
+
+```csy
+class Animal(name):
+    func speak(me):
+        rt me::name + " makes a sound";
+    ::ext
+    func twice(me):
+        rt me::speak() + ", " + me::speak();
+    ::ext
+::ext
+
+class Dog(name, tricks) extends Animal(name):
+    func speak(me):
+        rt me::name + " barks";
+    ::ext
+::ext
+
+d = Dog("Rex", 3);
+bc::out>d::speak();    # Rex barks
+bc::out>d::twice();    # Rex barks, Rex barks
+bc::out>d::tricks;     # 3
+```
+
+- Write the base class arguments after its name (`Animal(name)`), using the derived
+  class's own parameter names. A wrong number of arguments is a warning.
+- The derived class has all the base class methods and fields plus its own.
+- A method with the same name replaces the base one, and base methods that call
+  `me::speak()` use the replacement.
+- Chains work: `class C(...) extends B(...)` where `B` extends `A`.
+- One base class only. The base class can be written above or below the derived class.
+
 ## Dictionaries/Records
 
 ```csy
@@ -346,6 +381,10 @@ i += 1;       # Increment
 i -= 1;       # Decrement
 ```
 
+- `%` is modulo. `/` between two integers is integer division and truncates toward zero (`10 / 4` is `2`, `-7 / 2` is `-3`); use a float on either side for a fractional result (`10.0 / 4` is `2.5`).
+- Only `+=` and `-=` exist as compound assignment. `*=`, `/=` and `%=` are not supported; write `x = x * 2;`.
+- Integer arithmetic that overflows 64 bits stops with a runtime error instead of wrapping.
+
 ### Comparison Operators
 ```csy
 x > 5;   # Greater than
@@ -369,7 +408,7 @@ bc::sqrt(16);       # Square root
 bc::pow(2, 10);     # Power
 bc::sin(0);         # Sine
 bc::cos(0);         # Cosine
-bc::log(bc::E);     # Natural log
+bc::log(bc::E());   # Natural log
 bc::floor(3.7);     # Floor
 bc::ceil(3.2);      # Ceiling
 bc::round(3.5);     # Round
@@ -377,8 +416,8 @@ bc::abs(-42);       # Absolute value
 bc::max(10, 20);    # Maximum
 bc::min(10, 20);    # Minimum
 bc::clamp(15, 0, 10);  # Clamp to range
-bc::PI;             # Pi constant
-bc::E;              # Euler's number
+bc::PI();           # Pi constant (a call; bare bc::PI is a function value, not the number)
+bc::E();            # Euler's number (same rule)
 ```
 
 ## Built-in Functions
@@ -462,7 +501,7 @@ B = [
 ];
 
 # Matrix operations
-R = bc::matmul(C, D);    # Matrix multiplication
+R = bc::matmul(C, D);    # Matrix multiplication (works, but warns: deprecated, prefer ai::matmul)
 T = bc::transpose(B);   # Transpose
 
 # Vector operations
@@ -768,6 +807,26 @@ bc::out>value;  # Special > syntax for output
 o>value;        # With alias: using bc::out as o
 ```
 
+Output can be chained. Each `>` prints one more value on the same line, with no
+separator, and the newline comes once at the end:
+
+```csy
+x = 5;
+o>"x=">x>", half=">(x / 2.0);   # prints: x=5, half=2.5
+```
+
+**Comparisons and logic must be wrapped in parentheses when printed.** `>` is also the
+comparison operator, so the compiler reads `o>x == 5;` as something other than
+"print the result" and it prints nothing, and `o>x > 4;` prints `x` and then `4`.
+Arithmetic (`+ - * / %`) is safe without parentheses.
+
+```csy
+o>(x == 5);                 # prints true
+o>((x > 3) && (x < 9));     # wrap the whole expression
+r = x > 3;                  # or store it first
+o>r;
+```
+
 ### Function Return
 
 ```csy
@@ -791,7 +850,7 @@ From highest to lowest:
 6. Equality `==`, `!=`
 7. Logical AND `&&`
 8. Logical OR `||`
-9. Assignment `=`, `+=`, `-=`, `*=`, `/=`
+9. Assignment `=`, `+=`, `-=`
 
 ## Complete Example
 
@@ -808,8 +867,7 @@ func factorial(n):
 ::ext
 
 # Class definition
-class Counter(start):
-    var count = start;
+class Counter(count):
     func increment(me):
         me::count += 1;
         rt me::count;
@@ -825,8 +883,10 @@ for i in nums:
 
 # Using class
 c = Counter(0);
-o>count = c::increment();
-o>count = c::increment();
+count = c::increment();
+o>count;
+count = c::increment();
+o>count;
 
 # Dict operations
 tally = {"a": 0, "b": 0};
@@ -868,11 +928,79 @@ csyc build --threads 4
 
 # Pass arguments to program
 csyc main.csy -- arg1 arg2
+
+# Create a new project folder (project.csp, src/main.csy, .gitignore, ccm_table.bin)
+csyc init myapp
+
+# Print the #explain text of a name (no name lists everything)
+csyc explain double --path src/lib/math.csy
+csyc explain                       # inside a project folder, searches project.csp
+
+# Install csyc itself, and check the system first
+csyc doctor
+csyc install --dry-run
+csyc install [--force] [--prefix DIR] [--yes] [--no-deps]
+                                   # default /usr; warns when another csyc on PATH shadows it
+
+# Cooler Compiler (see the Cooler Compiler section)
+csyc enable ccm
+csyc disable ccm
+csyc wipe --ccm-mem [--yes]
+
+# Version (the word 'version' alone is not a command)
+csyc --version
 ```
+
+## Cooler Compiler
+
+The Cooler Compiler is an optional extra voice for the compiler. It is off until you
+turn it on. The compiler's own messages stay factual; when it is on, a short extra line
+may follow them.
+
+```bash
+csyc enable ccm          # turn it on for this project folder
+csyc disable ccm         # turn it off again
+csyc wipe --ccm-mem      # forget everything it remembers
+```
+
+- The setting lives in `csyconf.json` in the project folder (`"cooler_compiler": true`).
+  For a single `.csy` file, the folder of that file is used.
+- The table must sit in the same folder. `csyc enable ccm` does not create it; in a folder
+  without `ccm_table.bin` the compiler prints a note and compiles without the extra lines.
+- `csyc init` places `ccm_table.bin` in the new project. It is a data file, not part of
+  the compiler, and `csyc install` also keeps a copy next to the install (in
+  `share/csyc/`) for `init` to copy.
+- It remembers builds and runs in `ccm_mem.bin` (at most 500 records, oldest dropped
+  first), including file paths and content fingerprints.
+- The extra line is printed only when output goes to a terminal. In scripts, pipes and
+  CI nothing is added.
+- `csyc wipe --ccm-mem` always asks "are you sure" first, even when the Cooler Compiler
+  is off, and only `y` counts as yes. When input is not a terminal it refuses unless you
+  pass `--yes`.
+- `ccm_mem.bin`, `ccm_mem.lock` and `csyconf.json` are not covered by the `.gitignore`
+  that `csyc init` writes (it only ignores `*.cso`); add them yourself if you do not
+  want them committed.
+
+## Known Quirks
+
+Behaviors that are easy to trip over. They are listed so you can work around them.
+
+- Printing a comparison or logical expression needs parentheses (see Print Output).
+- `bc::round(x, 2)` ignores the second argument and rounds to a whole number.
+- `bc::min` and `bc::max` take numbers as separate arguments. Passing one vector does not
+  find its smallest or largest element.
+- `bc::int("abc")` returns `0` instead of an error. `bc::read_file` on a missing file
+  returns `none`. `bc::sqrt(-1)` gives `nan`.
+- Strings are bytes: `bc::len("héllo")` is `6`, and `bc::upper` / `bc::lower` only change
+  ASCII letters.
+- Dictionaries have no guaranteed order. Printing, `bc::keys` and `bc::dict_merge` may
+  list keys in different orders.
+- Runtime errors show line `0:0` in the header; the real line is in the message
+  (`at top level, line 5`).
 
 ## Important Notes
 
-1. **No semicolons at end of lines** (except for statements like `rt value;`)
+1. **Statements end with `;`**. A missing `;` is a warning (the compiler inserts one), but write it. Block headers (`if ...:`, `func ...:`) and `::ext` take no semicolon
 2. **Indentation is not significant** - blocks are delimited by `::ext`
 3. **Implicit typing** - types are inferred from values
 4. **Everything is an expression** - but only some contexts use the value
@@ -920,9 +1048,9 @@ The following keywords are reserved in CSy:
 - `none` - Null value
 - `true` - Boolean true
 - `false` - Boolean false
-- `extends` - Class inheritance (reserved for future use)
-- `try` - Exception handling (reserved for future use)
-- `catch` - Exception handling (reserved for future use)
+- `extends` - Class inheritance
+- `try` - Start a protected block
+- `catch` - Handle an error raised inside the `try` block
 
 ## Additional Math Functions
 
@@ -1057,6 +1185,15 @@ bc::append_file(path, content);  # Append content to file
 bc::sleep(seconds);  # Sleep for specified seconds (capped at 1 day)
 ```
 
+## Pi Digits
+
+```csy
+digits = bc::pi_digits(50);   # pi as a string of digits
+```
+
+`bc::pi_digits` needs the GMP C++ library when csyc is built. Without it, the call stops
+with "bc::pi_digits requires GMP"; rebuild csyc with GMP installed.
+
 ## TUI (Terminal UI) Module
 
 The TUI module provides terminal control without external libraries.
@@ -1151,8 +1288,8 @@ using #inc as import;    # Your own name for a directive, for this file
 - `=` - Assignment
 - `+=` - Add and assign
 - `-=` - Subtract and assign
-- `*=` - Multiply and assign
-- `/=` - Divide and assign
+
+`*=`, `/=` and `%=` are not supported.
 
 ### Comparison
 - `==` - Equal
@@ -1226,7 +1363,28 @@ bc::raise("error message");
 # Example: "vector index 9 out of bounds (size 3) (in function 'f', line 4)"
 ```
 
-Note: `try` and `catch` keywords are reserved but not yet implemented.
+### try and catch
+
+`try` and `catch` are implemented. If anything inside the `try` block raises an error
+(`bc::raise`, a runtime error such as division by zero or an out-of-range index), the
+`catch` block runs with the error message bound to the name you give it, as a string.
+
+```csy
+#inc basic as bc;
+
+try:
+    bc::raise("boom");
+catch e:
+    bc::out>"caught: " + e;
+::ext
+```
+
+- One `::ext` closes the whole `try ... catch ...` statement.
+- `catch` needs a name (`catch e:`); `try` without `catch` is a syntax error.
+- It works inside functions, loops (`skip` and `stop` still work) and nested `try` blocks.
+  Raising again from a `catch` block is caught by an outer `try`.
+- Errors found while compiling (syntax errors, unknown names) are not catchable; only
+  errors raised while the program runs are.
 
 ## Type Coercion
 
@@ -1261,8 +1419,9 @@ The compiler enforces safety limits:
 - Number of files: 4096 max
 - Connection levels: 256 max
 - Tokens per file: 48 million max
-- Expression nesting: 1000 levels max
-- Statement nesting: 256 levels max
+- Parenthesis and expression nesting: 255 levels max (the error says 256)
+- Expression chain length: 1000 max, so `1+1+...` works up to 999 terms and fails at 1001
+- Statement nesting: 255 levels max (`if` inside `if` inside ...)
 - Builtin arguments: 1000 max
 - Tensor elements: 134 million max
 - File read size: 1 GiB max
@@ -1284,6 +1443,24 @@ Use `--explain-native` to see why functions stay interpreted.
 
 ```csy
 #inc nvidia as nv;  # Deprecated, use #inc ai as ai
+```
+
+Hardware queries still work through `nv::`. Each takes an optional device index
+(default 0) and returns `-1` (numbers), `"n/a"` or `"none"` (text) when no GPU is present:
+
+```csy
+nv::available();           # true or false
+nv::device_count();
+nv::name();                # "none" when there is no GPU
+nv::info();                # dict with all of the fields below
+nv::driver_version();
+nv::compute_capability();
+nv::memory_total();        # bytes
+nv::memory_free();
+nv::memory_used();
+nv::temperature();         # Celsius
+nv::utilization();         # percent
+nv::power();               # watts
 ```
 
 Note: The `nvidia` module is deprecated. Use the `ai` module for GPU operations instead.

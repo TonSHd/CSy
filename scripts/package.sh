@@ -53,20 +53,18 @@ tar)
     (cd "$STAGE/$NAME" && find . -type f | sed 's|^\./||' | sort > share/doc/csyc/MANIFEST)
     cat > "$STAGE/$NAME/install.sh" <<'INSTALL'
 #!/bin/sh
-# usage: ./install.sh [PREFIX]     (default /usr/local; use /usr to put csyc in /usr/bin)
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PREFIX=${1:-/usr/local}
+PREFIX=${1:-/usr}
 mkdir -p "$PREFIX"
 cp -a "$HERE/bin" "$HERE/share" "$PREFIX/"
 echo "csyc installed in $PREFIX/bin/csyc"
 INSTALL
     cat > "$STAGE/$NAME/uninstall.sh" <<'UNINSTALL'
 #!/bin/sh
-# usage: ./uninstall.sh [PREFIX]   (the same PREFIX as the install)
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PREFIX=${1:-/usr/local}
+PREFIX=${1:-/usr}
 while IFS= read -r f; do rm -f "$PREFIX/$f"; done < "$HERE/share/doc/csyc/MANIFEST"
 rm -f "$PREFIX/share/doc/csyc/MANIFEST"
 rmdir "$PREFIX/share/doc/csyc/ccm" "$PREFIX/share/doc/csyc" "$PREFIX/share/csyc" 2>/dev/null || true

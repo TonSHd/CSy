@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(csy CXX)
 
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Install prefix" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -77,3 +81,6 @@ else()
 endif()
 
 install(TARGETS csyc DESTINATION bin)
+install(FILES ccm_table.bin DESTINATION share/csyc)
+install(FILES packaging/csyc.1 DESTINATION share/man/man1)
+install(FILES README.md DESTINATION share/doc/csyc)

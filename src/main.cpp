@@ -458,6 +458,61 @@ static int install_table(const std::filesystem::path& root, bool force, bool dry
     return 0;
 }
 
+static std::vector<std::filesystem::path> csyc_copies_on_path() {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> found;
+    const char* path_env = std::getenv("PATH");
+    if (!path_env) return found;
+    std::error_code ec;
+    std::stringstream parts(path_env);
+    for (std::string part; std::getline(parts, part, ':');) {
+        if (part.empty()) continue;
+        const fs::path candidate = fs::path(part) / "csyc";
+        if (!fs::is_regular_file(candidate, ec) || ::access(candidate.c_str(), X_OK) != 0) continue;
+        bool seen = false;
+        for (const auto& f : found)
+            if (fs::equivalent(f, candidate, ec)) { seen = true; break; }
+        if (!seen) found.push_back(candidate);
+    }
+    return found;
+}
+
+static std::string removal_command(const std::filesystem::path& file) {
+    bool possible = true;
+    std::vector<std::string> cmd;
+    if (!osinfo::is_root() && !folder_writable(file.parent_path())) cmd = osinfo::privilege_prefix(possible);
+    cmd.push_back("rm");
+    cmd.push_back(file.string());
+    return osinfo::join_command(cmd);
+}
+
+static void warn_about_shadowing(const std::filesystem::path& target, bool installed) {
+    namespace fs = std::filesystem;
+    const std::vector<fs::path> copies = csyc_copies_on_path();
+    if (copies.empty()) return;
+    std::error_code ec;
+    const bool target_exists = fs::exists(target, ec);
+    for (size_t i = 0; i < copies.size(); ++i) {
+        if (target_exists && fs::equivalent(copies[i], target, ec)) continue;
+        std::string have = installed_version_of(copies[i]);
+        if (have.empty()) have = "unknown version";
+        const bool runs_first = (i == 0);
+        if (runs_first) {
+            if (installed)
+                std::cout << "warning: typing 'csyc' still starts " << copies[i].string() << " (" << have
+                          << "), not the copy just installed as " << target.string() << "\n";
+            else
+                std::cout << "warning: " << copies[i].string() << " (" << have
+                          << ") is on your PATH and starts instead of " << target.string() << "\n";
+        } else {
+            std::cout << "note: another csyc is on your PATH after the first one: " << copies[i].string()
+                      << " (" << have << "); it is not used\n";
+        }
+        std::cout << "      remove it with: " << removal_command(copies[i]) << "\n";
+        if (runs_first) std::cout << "      then run 'hash -r' or open a new terminal\n";
+    }
+}
+
 static int install_self(int argc, char** argv) {
     namespace fs = std::filesystem;
     bool force = false, assume_yes = false, no_deps = false, dry_run = false;
@@ -490,13 +545,16 @@ static int install_self(int argc, char** argv) {
         if (have.empty()) have = "unknown version";
         if (this_is_it) {
             std::cout << "[csy] csyc " << CSYC_VERSION << " is already installed as " << target.string() << " (this is that copy)\n";
+            warn_about_shadowing(target, true);
             return 0;
         }
         if (!force) {
             if (same_bytes(self, target)) {
                 std::cout << "[csy] csyc " << CSYC_VERSION << " is already installed in " << target.string()
                           << " and identical to this one; use 'csyc install --force' to reinstall anyway\n";
-                return install_table(root, false, dry_run);
+                const int same_rc = install_table(root, false, dry_run);
+                warn_about_shadowing(target, true);
+                return same_rc;
             }
             std::cerr << "error: csyc (" << have << ") is already installed as " << target.string()
                       << "; use 'csyc install --force' to replace it with this one (" << CSYC_VERSION << ")\n";
@@ -519,7 +577,9 @@ static int install_self(int argc, char** argv) {
             std::cout << "[csy] would install csyc " << CSYC_VERSION << " as " << target.string();
             if (need_admin) std::cout << " by running: " << osinfo::join_command(cmd);
             std::cout << "\n";
-            return install_table(root, force, true);
+            const int dry_rc = install_table(root, force, true);
+            warn_about_shadowing(target, false);
+            return dry_rc;
         }
         if (!possible) {
             std::cerr << "error: writing '" << dir.string() << "' needs administrator rights and neither sudo nor doas was found; as root run: "
@@ -555,6 +615,7 @@ static int install_self(int argc, char** argv) {
             if (!part.empty() && fs::path(part).lexically_normal() == dir) on_path = true;
     }
     if (!on_path) std::cout << "note: " << dir.string() << " is not in your PATH\n";
+    warn_about_shadowing(target, true);
     return table_rc;
 }
 
@@ -622,6 +683,17 @@ static int doctor_command(int argc, char** argv) {
         if (this_copy) std::cout << ", this is that copy";
     }
     std::cout << "\n  Folder writable:  " << (folder_writable(dir) ? "yes" : (possible ? "no, csyc install will use " + (admin.empty() ? std::string("administrator rights") : admin[0]) : "no, and no sudo or doas to get rights")) << "\n";
+    {
+        const std::vector<fs::path> copies = csyc_copies_on_path();
+        if (copies.empty()) std::cout << "  csyc on PATH:     none\n";
+        for (size_t i = 0; i < copies.size(); ++i) {
+            std::string have = installed_version_of(copies[i]);
+            if (have.empty()) have = "unknown version";
+            std::cout << (i == 0 ? "  csyc on PATH:     " : "                    ") << copies[i].string() << " (" << have << ")"
+                      << (i == 0 ? ", the one that runs" : ", never reached") << "\n";
+        }
+    }
+    warn_about_shadowing(target, fs::exists(target, ec));
     if (this_copy) { std::cout << "  Result:           this csyc is the installed one\n"; return 0; }
     std::cout << "  Result:           " << (os.family.empty() ? "csyc can be installed; the distribution is not recognised, so the C compiler is left to you"
                                                                : "ready to install") << "\n";
