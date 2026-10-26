@@ -38,7 +38,7 @@ project sources as well. Otherwise it runs the existing object.
 
 Not gonna brag but you can alias almost everything in CSy using "as, using"
 
-You can learn everything in our learning document!
+You can learn everything in our learning document in CSY_SYNTAX_REFERENCE.md!
 CSy was still in early version (1.0.0) so you might encounter weird stuff.
 But don't just ignore it! Tell us in issues
 
