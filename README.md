@@ -53,7 +53,7 @@ Statements end with `;`. A missing one is only a warning, but write it.
 
 using bc::out as say;
 
-say>"hello"
+say>"hello";
 ```
 
 `csyc build` reads `project.csp` in the current directory. Pass a different
