@@ -51,7 +51,7 @@ it was mostly for Machine Learning
 
 ## AI Distrubutions
 
-ChatGPT, Claude, Z.ai(GLM), Deepseek
+ChatGPT, Claude, Z.ai(GLM), Deepseek(Tester), Grok
 
 Right now.. CSy is Linux only.
 
