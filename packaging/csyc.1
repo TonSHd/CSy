@@ -1,0 +1,202 @@
+.TH CSYC 1 "" "csyc" "CSy compiler"
+.SH NAME
+csyc \- the CSy compiler and runner
+.SH SYNOPSIS
+.B csyc
+.I file.csy
+.RI [ files... ]
+.RB [ \-\- " args..." ]
+.br
+.B csyc build
+.RI [ project.csp | file.csy ]
+.RB [ \-o " out.cso"]
+.br
+.B csyc run
+.I file.cso
+.br
+.B csyc init
+.RI [ path ]
+.br
+.B csyc install
+.RB [ \-\-force ]
+.RB [ \-\-prefix " DIR]"
+.RB [ \-\-yes ]
+.RB [ \-\-no\-deps ]
+.RB [ \-\-dry\-run ]
+.br
+.B csyc doctor
+.RB [ \-\-prefix " DIR]"
+.br
+.B csyc explain
+.RI [ NAME ]
+.RB [ \-\-path " file.csy|project.csp]"
+.br
+.B csyc enable ccm
+|
+.B csyc disable ccm
+.br
+.B csyc wipe \-\-ccm\-mem
+.RB [ \-\-yes ]
+.br
+.B csyc \-\-help
+|
+.B \-\-version
+.SH DESCRIPTION
+.B csyc
+compiles CSy programs to bytecode (with an optional native fast path) and runs them.
+A project is described by a
+.B project.csp
+file; a single source file needs no project.
+.SH COMMANDS
+.TP
+.I file.csy
+Compile and run. A
+.I project.csp
+or a
+.I file.cso
+may be given instead, and
+.B csyc .
+compiles ./main.csy.
+.TP
+.B build
+Compile without running. With no argument it builds ./project.csp. The object is written next to the entry file unless
+.B \-o
+or the project's
+.B output
+says otherwise.
+.TP
+.B run
+Run a compiled object, rebuilding it first from the matching source or project when that is newer.
+.TP
+.BI init " [path]"
+Create a default project in
+.I path
+(default: the current folder; missing folders are created):
+.BR project.csp ,
+.B src/main.csy
+,
+.B .gitignore
+and a copy of the Cooler Compiler table
+.BR ccm_table.bin .
+Existing files are never overwritten, and a folder that already has a project.csp is refused.
+.TP
+.B install
+Detect the operating system (Linux distributions; Windows and macOS are refused for now), offer to add the optional C compiler with the
+system package manager (apt\-get, dnf or yum, pacman, zypper, apk, xbps\-install), then copy this csyc to
+.IR DIR /bin/csyc
+(default prefix /usr). Steps that need administrator rights run through sudo or doas, which ask for your password.
+If a csyc is already there it stops;
+.B \-\-force
+replaces it. The binary and the Cooler Compiler table (DIR/share/csyc/ccm_table.bin, never replacing an existing one unless
+.B \-\-force
+is given) are installed; the packages also add this manual page and the docs.
+.TP
+.B doctor
+Show the detected operating system, the package manager, the administrator rights available, whether a C compiler is present,
+and the state of the install target, without changing anything.
+.TP
+.BI explain " [NAME] [\-\-path file]"
+Print what the
+.B #explain
+lines of a CSy file say about a function or variable: the text, the line where it is declared, and the names it refers to.
+.I NAME
+may be
+.I namespace::name
+for something in a connected file. Without a name every function and variable of the file is listed.
+.B \-\-path
+takes a .csy file or a project.csp (all of the project's files are then searched); without it ./project.csp is used.
+.TP
+.B enable ccm, disable ccm
+Switch the Cooler Compiler on or off (the key "cooler_compiler" in csyconf.json).
+.TP
+.B wipe \-\-ccm\-mem
+Ask, then wipe the Cooler Compiler memory. Without a terminal it needs
+.BR \-\-yes .
+.SH OPTIONS
+.TP
+.B \-\-verbose, \-v
+Explain each build stage and show progress.
+.TP
+.BI \-o " file"
+Write a compiled object (for a source build: the object, then run it).
+.TP
+.B \-\-exe
+With build: write a standalone executable (runtime plus program).
+.TP
+.B \-\-no\-native
+Skip the native fast path.
+.TP
+.B \-\-explain\-native
+Report which functions run natively and why the others do not.
+.TP
+.BI \-\-memory\-limit " MB"
+Compiler memory budget (default 2048; 0 disables the limit).
+.TP
+.BI \-\-threads " N|auto"
+Cap compiler worker threads (at most 256).
+.TP
+.BI \-\-run\-threads " N|auto"
+Threads for the built-in AI kernels at run time.
+.TP
+.B \-\-force
+With install: replace an installed csyc.
+.TP
+.B \-\-yes
+With install: install the C compiler package without asking.
+.TP
+.B \-\-no\-deps
+With install: do not look at the C compiler at all.
+.TP
+.B \-\-dry\-run
+With install: show what would be run and installed, and change nothing.
+.TP
+.BI \-\-prefix " DIR"
+With install: install under DIR instead of /usr.
+.TP
+.B \-\-
+Everything after it is passed to the program (bc::args()).
+.SH FILES
+.TP
+.B project.csp
+Project description: entry, sources, output.
+.TP
+.B csyconf.json
+In the project folder. "cooler_compiler": true turns the Cooler Compiler on; it is off otherwise.
+.TP
+.B ccm_table.bin
+In the project folder. The lines the Cooler Compiler says. It is a data file, not part of the compiler: it is installed in
+/usr/share/csyc/ccm_table.bin and csyc init copies it into every new project. To customise it, decode the project's copy
+with ccm_tools.py decode, edit the text, run ccm_tools.py encode and put the result back in the project folder.
+.TP
+.B ccm_mem.bin
+In the project folder. What the Cooler Compiler remembers (at most 500 records).
+.TP
+.B /usr/share/doc/csyc
+README, notes, the table template and ccm_tools.py.
+.SH ENVIRONMENT
+.TP
+.B CSYC_DATA_DIR
+When set, the only folder searched for the shipped ccm_table.bin (otherwise PREFIX/share/csyc next to the binary's folder, the folder
+of the binary, /usr/local/share/csyc and /usr/share/csyc).
+.TP
+.B CSYC_MEMORY_LIMIT_MB, CSYC_THREADS
+Defaults for \-\-memory\-limit and \-\-threads.
+.TP
+.B CC
+C compiler for the optional C native backend (the own x86\-64 backend needs none).
+.TP
+.B CSY_NO_NATIVE_JIT
+Set to 1 to disable the native fast path.
+.TP
+.B CSY_JIT_CACHE_DIR
+Where compiled native code is cached (default /tmp/csy_native_jit\-UID).
+.TP
+.B CSY_PROFILE
+Print timing and memory figures.
+.TP
+.B NO_COLOR
+Gray Cooler Compiler lines are printed without colour codes.
+.SH EXIT STATUS
+0 on success; 1 on a compile error, a runtime error, or a bad command line; otherwise the program's own exit code.
+.SH SEE ALSO
+The README and notes in /usr/share/doc/csyc.
