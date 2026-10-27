@@ -1,5 +1,6 @@
 #include "vm.hpp"
 #include "builtins_ext.hpp"
+#include "dataset.hpp"
 #include "ai_ops.hpp"
 #include "gpu_nvidia.hpp"
 #include "tui.hpp"
@@ -155,6 +156,7 @@ void VM::register_builtins() {
     builtin_names_ordered_ = {"out","range","len","push","input","str","int","float","bool","__range_bound"};
 
     register_extended_builtins(*this);
+    register_dataset_builtins(*this);
     register_ai_builtins(*this);
     register_nvidia_builtins(*this);
     register_tui_builtins(*this);

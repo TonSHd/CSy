@@ -548,6 +548,180 @@ bc::out>weights[-1];  # Last element
 - Used for AI model parameters
 - Can be compiled to native code for performance
 
+## Datasets and JSON
+
+CSy can read and write AI datasets as JSON, JSONL, Parquet, `.bin` tensors and plain
+text files. All of these are in `bc`. Every save writes to a temporary file first and
+renames it when finished, so a failed save never leaves a half written dataset. Errors
+are ordinary catchable errors with the file name and, for text formats, the line and
+column.
+
+### JSON
+
+```csy
+v = bc::json_parse("{\"a\": [1, 2.5, true, null]}");
+text = bc::json_stringify(v);
+pretty = bc::json_stringify(v, true);
+data = bc::load_json("config.json");
+bc::save_json("out.json", data, true);
+```
+
+- Objects become dicts, arrays become vectors, `null` becomes `none`.
+- A number without a fraction or exponent that fits in 64 bits is an int, any other number is a float.
+- The parser is strict: no trailing commas, no comments, no leading zeros, strings must be valid UTF-8.
+  The one extension is that `NaN`, `Infinity` and `-Infinity` are accepted, because Python writes them.
+- Nesting deeper than 256 levels is refused.
+- Dict keys are written in sorted order, so the same data always gives the same file.
+- `NaN` and infinity are written as `null`, because JSON cannot hold them.
+  Floats always keep a `.0` or exponent, so a float reads back as a float.
+
+### JSONL
+
+```csy
+rows = bc::load_jsonl("train.jsonl");
+first_100 = bc::load_jsonl("train.jsonl", 100);
+bc::save_jsonl("copy.jsonl", rows);
+```
+
+One JSON value per line. Blank lines are skipped, `\r\n` line endings and a leading
+byte order mark are accepted. A bad line is reported with its line number.
+
+### Parquet
+
+```csy
+t = bc::load_parquet("data.parquet");
+x = t["columns"]["height"];
+names = t["names"];
+rows = t["rows"];
+
+some = bc::load_parquet("data.parquet", ["height", "label"]);
+head = bc::load_parquet("data.parquet", none, 1000);
+
+bc::save_parquet("out.parquet", t);
+bc::save_parquet("out2.parquet", {"a": [1, 2, 3], "b": ["x", "y", "z"]});
+```
+
+`load_parquet` returns a dict with `names` (column names in file order), `rows`, and
+`columns` (a dict from name to column). Float and double columns come back as
+`f64_array` so they can go straight into `ai::` functions. Integer, bool and string
+columns come back as vectors. A null is `none` in a vector and `NaN` in an `f64_array`.
+Pass a vector of names to load only those columns, and a number as the third argument
+to stop after the row group that reaches that many rows (the result is cut to exactly
+that many).
+
+`save_parquet` takes the same table shape, or a plain dict of columns (written in
+sorted name order). A column is an `f64_array`, or a vector of one kind of value:
+numbers, bools or strings, with `none` for missing values. Ints mixed with floats
+become doubles. Files are written uncompressed, one row group per 1048576 rows.
+
+What it reads: flat tables, UNCOMPRESSED, SNAPPY and GZIP, PLAIN, dictionary,
+RLE and BYTE_STREAM_SPLIT encodings, data page versions 1 and 2. Dates, timestamps and
+decimals come back as their raw numbers. Not supported, with a clear error: nested or
+repeated columns (unless you select only the flat ones), ZSTD, LZ4 and Brotli,
+DELTA encodings, INT96 and fixed length byte columns, and encrypted files.
+
+### .bin tensors
+
+```csy
+bc::save_bin("images.bin", [[1, 2, 3], [4, 5, 6]]);
+r = bc::load_bin("images.bin");
+r["shape"];
+r["data"];
+
+bc::save_bin("w.bin", weights, [2, 3]);
+bc::save_bin("w32.bin", weights, [2, 3], "f32");
+```
+
+`save_bin(path, data[, shape][, dtype])` writes a self describing file: dtype, shape,
+the values, and a checksum. `data` is an `f64_array` or a rectangular nested vector of
+numbers. The dtype is `f64`, `f32`, `i64`, `i32` or `u8`; without one, a vector of ints is
+stored as `i64` and anything else as `f64`. `load_bin` returns a dict with `dtype`,
+`shape` and `data`, where `data` is a flat row major `f64_array`. A damaged or truncated
+file is refused. An `i64` value that cannot be kept exactly as a double is an error.
+
+For files with no header, such as arrays written by NumPy `tofile`:
+
+```csy
+x = bc::load_bin_raw("features.bin", "f32");
+y = bc::load_bin_raw("with_header.bin", "u8", 16);
+bc::save_bin_raw("out.bin", x, "f32");
+```
+
+All values are little endian.
+
+### Text files and one call for everything
+
+```csy
+lines = bc::load_text("corpus.txt");
+bc::save_text("copy.txt", lines);
+
+data = bc::load_dataset("train.jsonl");
+bc::save_dataset("train.parquet", table);
+```
+
+`load_text` returns one string per line. `load_dataset` and `save_dataset` pick the
+format from the extension: `.parquet` or `.pq`, `.jsonl` or `.ndjson`, `.json`, `.bin`,
+and anything else is a plain text file. Extra arguments are passed on to the matching
+function.
+
+`bc::to_f64(values)` turns a rectangular nested vector of numbers into one flat
+`f64_array`, for example the feature lists you get from JSON.
+
+The functions above load a whole file, so they are limited to files up to 1 GiB and
+tables up to 134217728 values. For anything bigger, read and write in batches.
+
+### Big datasets: reading and writing in batches
+
+```csy
+h = bc::open_dataset("train.parquet", {"columns": ["x", "label"]});
+total = 0;
+while true:
+    batch = bc::next_batch(h, 4096);
+    if batch == none:
+        stop;
+    ::ext
+    total += batch["rows"];
+::ext
+bc::close_dataset(h);
+```
+
+`open_dataset(path[, options])` returns a handle. `next_batch(handle, rows)` returns the
+next batch of at most that many rows, and `none` when the data is finished. Only one
+batch (plus one Parquet row group) is in memory at a time, so a 1.3 GB Parquet file or
+a 1.2 GB JSONL file streams in about 100 MB. `reset_dataset(handle)` starts again from
+the beginning (for the next epoch), `dataset_info(handle)` describes the dataset, and
+`close_dataset(handle)` releases it. At most 64 datasets can be open at once.
+
+What a batch looks like depends on the format:
+
+- `.parquet`: a table, the same shape as `load_parquet` returns. Option `columns`.
+- `.jsonl`: a vector of rows. `.txt` and other files: a vector of lines.
+- `.bin`: a dict with `dtype`, `shape` (first number is the rows in this batch) and a flat `data` f64_array.
+  For a file without a header pass `{"raw": "f32", "row_len": 784}`, and optionally `"offset"` to skip a header.
+  The checksum of a `.bin` file is checked when you read through to the end.
+
+Writing works the same way, and the file only appears when you close it:
+
+```csy
+out = bc::create_dataset("features.parquet");
+bc::write_batch(out, {"names": ["x"], "columns": {"x": values}});
+bc::close_dataset(out);
+```
+
+`create_dataset(path[, options])` picks the format from the extension, `write_batch(handle, batch)`
+takes the same kind of value that `save_*` takes, and `close_dataset` finishes the file. A
+writer that is never closed saves nothing and prints a warning when the program ends.
+
+- Parquet: the first batch fixes the column names and types, later batches must match
+  (ints may be added to a float column). Every column is nullable. A batch that does not
+  fit is rejected whole, and you can carry on writing. Batches are collected into row groups
+  of up to 1048576 rows.
+- `.bin`: the first batch fixes the dtype (option `dtype`) and every dimension after the first.
+- `.jsonl` and text files: append rows or lines.
+- A `.json` file is a single value, so it cannot be streamed.
+
+`bc::sum` and `bc::mean` also accept an f64_array.
+
 ## AI Operations
 
 ### Dense Layer

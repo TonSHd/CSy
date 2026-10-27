@@ -28,6 +28,10 @@ Then you can run
 ./csyc install
 ```
 
+## BUT WAIT!
+
+if you want "The Cooler Compiler" too. You need to put a file named "ccm_table.bin" into build/ first before running ./csyc install
+
 `csyc install` puts csyc in `/usr/bin` and the Cooler Compiler table in `/usr/share/csyc`.
 CMake and the tarball's `install.sh` use `/usr` too. If an older `csyc` sits earlier on
 your PATH (for example in `/usr/local/bin`), `csyc install` and `csyc doctor` tell you which
@@ -98,6 +102,7 @@ Other things CSy has that are easy to miss:
 - classes with inheritance: `class Dog(name) extends Animal(name):`
 - error handling with `try` and `catch e:`
 - several files in one program with `#connect "lib/math.csy";`
+- loading and saving AI datasets: JSON, JSONL, Parquet, `.bin` tensors and text files (`bc::load_dataset`, `bc::save_dataset`)
 - the Cooler Compiler, which stays off until you run `csyc enable ccm`
 
 One thing that trips people: printing a comparison needs parentheses.
@@ -114,9 +119,9 @@ This language was terrible at some stuff (and i mean it)
 
 it was mostly for Machine Learning
 
-## AI Distrubutions
+## AI Contribution
 
-ChatGPT, Claude, Z.ai(GLM), Deepseek(Tester), Grok
+ChatGPT, Claude, Z.ai(GLM), Deepseek, Grok
 
 Right now.. CSy is Linux only.
 

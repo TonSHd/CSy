@@ -422,6 +422,11 @@ void register_extended_builtins(VM& vm) {
     };
 
     builtins["sum"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (!args.empty() && args[0].type == Value::F64Array) {
+            double fs = 0.0;
+            for (const double x : *args[0].f64_array_val) fs += x;
+            return Value::make_float(fs);
+        }
         if (args.empty() || args[0].type != Value::Vec) return Value::make_float(0.0);
         double s = 0.0;
         bool all_int = true;
@@ -456,6 +461,11 @@ void register_extended_builtins(VM& vm) {
     };
 
     builtins["mean"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (!args.empty() && args[0].type == Value::F64Array && !args[0].f64_array_val->empty()) {
+            double fs = 0.0;
+            for (const double x : *args[0].f64_array_val) fs += x;
+            return Value::make_float(fs / (double)args[0].f64_array_val->size());
+        }
         if (args.empty() || args[0].type != Value::Vec || args[0].vec_val->empty())
             return Value::make_float(0.0);
         double s = 0.0;

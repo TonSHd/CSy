@@ -36,6 +36,10 @@ set(CSY_SOURCES
     src/ir.cpp
     src/value.cpp
     src/builtins_ext.cpp
+    src/compress.cpp
+    src/json.cpp
+    src/parquet.cpp
+    src/dataset.cpp
     src/ai_ops.cpp
     src/pi.cpp
     src/gpu_nvidia.cpp

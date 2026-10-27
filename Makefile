@@ -36,6 +36,10 @@ SOURCES := \
 	$(CSY_DIR)/ir.cpp \
 	$(CSY_DIR)/value.cpp \
 	$(CSY_DIR)/builtins_ext.cpp \
+	$(CSY_DIR)/compress.cpp \
+	$(CSY_DIR)/json.cpp \
+	$(CSY_DIR)/parquet.cpp \
+	$(CSY_DIR)/dataset.cpp \
 	$(CSY_DIR)/ai_ops.cpp \
 	$(CSY_DIR)/pi.cpp \
 	$(CSY_DIR)/gpu_nvidia.cpp \
