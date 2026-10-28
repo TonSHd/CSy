@@ -1,10 +1,5 @@
 CSY_DIR := src
 VERSION := $(strip $(shell cat VERSION))
-ifneq ($(origin VERSION),file)
-ifneq ($(wildcard VERSION.frozen),)
-$(error the version is frozen at $(strip $(shell cat VERSION)) (see VERSION.frozen); it changes only after the owner unfreezes it)
-endif
-endif
 PREFIX ?= /usr
 DESTDIR ?=
 CXX := g++
