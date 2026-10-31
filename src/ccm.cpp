@@ -31,7 +31,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-// This file was written by Claude!
 
 namespace csy {
 namespace ccm {
@@ -40,25 +39,19 @@ namespace {
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 
-// ------------------------------------------------------------------------------------------------------
-// Numbers the user's table did not define. Each one is a single named constant so it is easy to change.
-// ------------------------------------------------------------------------------------------------------
-constexpr size_t kMemoryCap = 500;                 // C11: records kept, oldest dropped first
-constexpr uint64_t kSourceBigBytes = 5ull << 20;   // C16: source.big from 5 MB
-constexpr int64_t kBeenAWhileSeconds = 7 * 86400;  // C16: mem.been.a.while after 7 days
-constexpr int kStreakMin = 3;                      // "several in a row" (mem.streak.fail / mem.streak.success)
-constexpr int kComebackMin = 2;                    // "a run of failures" before a success (mem.comeback)
-constexpr int kManySuccessesMin = 5;               // "many times" (mem.many.successes.same.file)
-constexpr int kRepeatedErrorMin = 3;               // "appeared multiple times" (own.b.1)
+constexpr size_t kMemoryCap = 500;
+constexpr uint64_t kSourceBigBytes = 5ull << 20;
+constexpr int64_t kBeenAWhileSeconds = 7 * 86400;
+constexpr int kStreakMin = 3;
+constexpr int kComebackMin = 2;
+constexpr int kManySuccessesMin = 5;
+constexpr int kRepeatedErrorMin = 3;
 
 constexpr uintmax_t kMaxTableBytes = 16u << 20;
 constexpr uintmax_t kMaxMemBytes = 4u << 20;
 constexpr uintmax_t kMaxConfBytes = 1u << 20;
 constexpr uintmax_t kMaxHashedBytes = 40u << 20;
 
-// ------------------------------------------------------------------------------------------------------
-// Small helpers
-// ------------------------------------------------------------------------------------------------------
 bool starts_with(const std::string& s, const char* p) { return s.compare(0, std::strlen(p), p) == 0; }
 bool contains(const std::string& s, const char* p) { return s.find(p) != std::string::npos; }
 
@@ -107,14 +100,12 @@ uint32_t id_hash(const std::string& id) {
 
 int64_t now_unix() { return static_cast<int64_t>(std::time(nullptr)); }
 
-// P10: time under 10 s as whole milliseconds, otherwise seconds with one decimal.
 std::string fmt_duration_ms(double ms) {
     char b[48];
     if (ms < 10000.0) std::snprintf(b, sizeof b, "%lld ms", static_cast<long long>(ms + 0.5));
     else std::snprintf(b, sizeof b, "%.1f s", ms / 1000.0);
     return b;
 }
-// P10: time since something as days, hours or minutes.
 std::string fmt_since(int64_t seconds) {
     if (seconds < 0) seconds = 0;
     char b[48];
@@ -127,7 +118,6 @@ std::string fmt_since(int64_t seconds) {
     else std::snprintf(b, sizeof b, "under a minute");
     return b;
 }
-// P10: sizes as 812 B, 35.2 KiB, 35.2 MiB.
 std::string fmt_size(uint64_t bytes) {
     char b[48];
     if (bytes < 1024) std::snprintf(b, sizeof b, "%llu B", static_cast<unsigned long long>(bytes));
@@ -143,13 +133,10 @@ std::string base_name(const std::string& p) {
     return n.empty() ? p : n;
 }
 
-// ------------------------------------------------------------------------------------------------------
-// The table (ccm_table.bin, format v1, written by scripts/ccm_tools.py)
-// ------------------------------------------------------------------------------------------------------
 struct Table {
     struct Sit { std::string id; uint32_t first = 0, count = 0; };
     std::vector<Sit> sits;
-    std::vector<std::pair<uint32_t, uint32_t>> lines;   // offset, length inside `data`
+    std::vector<std::pair<uint32_t, uint32_t>> lines;
     std::string data;
 
     const Sit* find(const std::string& id) const {
@@ -187,15 +174,12 @@ bool parse_table(const std::string& raw, Table& t) {
         s.id.assign(t.data, static_cast<size_t>(off), static_cast<size_t>(len));
         s.first = static_cast<uint32_t>(first);
         s.count = static_cast<uint32_t>(cnt);
-        if (!t.sits.empty() && !(t.sits.back().id < s.id)) return false;   // must be sorted and unique
+        if (!t.sits.empty() && !(t.sits.back().id < s.id)) return false;
         t.sits.push_back(std::move(s));
     }
     return true;
 }
 
-// ------------------------------------------------------------------------------------------------------
-// The memory (ccm_mem.bin): a header, 128 fixed "which lines were used" slots (P4), then fixed size records.
-// ------------------------------------------------------------------------------------------------------
 constexpr size_t kMemHeader = 32, kSlotCount = 128, kSlotSize = 32, kRecSize = 64;
 enum RecType : uint8_t { kAttempt = 1, kEnableMarker = 2 };
 enum RecFlag : uint8_t { kSuccess = 1, kRunMode = 2, kHasContent = 4 };
@@ -203,11 +187,11 @@ enum RecFlag : uint8_t { kSuccess = 1, kRunMode = 2, kHasContent = 4 };
 struct Rec {
     uint8_t type = 0, flags = 0;
     uint16_t errors = 0, warnings = 0;
-    uint32_t sit = 0;            // hash of the situation id of the first error (0 = none known)
+    uint32_t sit = 0;
     int64_t time = 0;
     Hash128 path, content;
 };
-struct Slot { uint32_t sit = 0, last = 0; uint64_t used = 0; };   // last = index + 1, 0 = none
+struct Slot { uint32_t sit = 0, last = 0; uint64_t used = 0; };
 
 struct Mem {
     std::vector<Rec> recs;
@@ -274,7 +258,6 @@ MemStatus load_mem(const fs::path& file, Mem& m) {
     return MemStatus::Ok;
 }
 
-// Exclusive lock on a side file so two csyc processes cannot corrupt the memory. Gives up after ~3 s.
 struct MemLock {
     int fd = -1;
     explicit MemLock(const fs::path& lock_file) {
@@ -306,7 +289,6 @@ bool write_atomic(const fs::path& target, const std::string& bytes) {
     return true;
 }
 
-// Mark one line as used in a slot. A full round starts a new one.
 void mark_used(Slot& s, uint32_t idx, uint32_t n) {
     if (n <= 64) {
         const uint64_t full = n == 64 ? ~0ull : ((1ull << n) - 1);
@@ -322,9 +304,6 @@ Slot* find_slot(std::array<Slot, kSlotCount>& slots, uint32_t sit, bool create) 
     return nullptr;
 }
 
-// ------------------------------------------------------------------------------------------------------
-// Session state
-// ------------------------------------------------------------------------------------------------------
 struct Pick { uint32_t sit; uint32_t idx; uint32_t n; };
 struct Fields {
     std::map<std::string, std::string> v;
@@ -351,13 +330,11 @@ struct State {
     bool run_started = false;
     bool running_user_code = false;
 
-    // the subject of this attempt
     bool has_subject = false, run_mode = false;
     std::string subject, subject_name;
     Hash128 path_hash, content_hash;
     bool has_content = false;
 
-    // what the line catcher saw
     Phase phase = Phase::Syntax;
     int errors = 0, warnings = 0;
     uint32_t first_error_sit = 0;
@@ -373,8 +350,6 @@ struct State {
     bool installed = false;
 };
 
-// Choose a line of a situation (P3 option A): every round the lines come in a shuffled order, and the first
-// line of a new round is never the last line of the previous round. Empty if the situation has no lines.
 std::string pick_line(State& st, const std::string& id, const Fields& f) {
     const Table::Sit* sit = st.table.find(id);
     if (!sit || sit->count == 0) return std::string();
@@ -382,7 +357,7 @@ std::string pick_line(State& st, const std::string& id, const Fields& f) {
     const uint32_t key = id_hash(id);
     Slot scratch;
     Slot* slot = find_slot(st.mem.slots, key, true);
-    if (!slot) { scratch.sit = key; slot = &scratch; }   // no free slot: remember only this one pick
+    if (!slot) { scratch.sit = key; slot = &scratch; }
     std::vector<uint32_t> candidates;
     if (n <= 64) {
         const uint64_t full = n == 64 ? ~0ull : ((1ull << n) - 1);
@@ -390,7 +365,7 @@ std::string pick_line(State& st, const std::string& id, const Fields& f) {
         const uint64_t used = new_round ? 0 : slot->used;
         for (uint32_t i = 0; i < n; ++i) {
             if (used & (1ull << i)) continue;
-            if (new_round && n > 1 && slot->last == i + 1) continue;   // never repeat across a round boundary
+            if (new_round && n > 1 && slot->last == i + 1) continue;
             candidates.push_back(i);
         }
     } else {
@@ -422,12 +397,10 @@ std::string gray(const State& st, int fd, const std::string& line) {
     return "\x1b[90m" + line + "\x1b[0m\n";
 }
 
-// The conversation line for a situation as text ready to print on stream `fd`, empty if nothing is to be said
-// (off, not a terminal, or the situation has no lines in the user's table).
 std::string say(State& st, const std::string& id, const Fields& f, int fd) {
     if (!st.on) return std::string();
     const bool tty = fd == 1 ? st.tty_out : st.tty_err;
-    if (!tty) return std::string();   // C8: no conversation when the output is not a terminal
+    if (!tty) return std::string();
     const std::string line = pick_line(st, id, f);
     if (line.empty()) return std::string();
     return gray(st, fd, line);
@@ -439,9 +412,6 @@ void write_direct(State& st, int fd, const std::string& text) {
     if (b) { b->sputn(text.data(), static_cast<std::streamsize>(text.size())); b->pubsync(); }
 }
 
-// ------------------------------------------------------------------------------------------------------
-// Which situation does a factual message belong to?
-// ------------------------------------------------------------------------------------------------------
 struct Hit { std::string id; Fields f; };
 
 std::string between(const std::string& s, const char* a, const char* b) {
@@ -451,7 +421,7 @@ std::string between(const std::string& s, const char* a, const char* b) {
     const size_t j = b ? s.find(b, from) : std::string::npos;
     return s.substr(from, j == std::string::npos ? std::string::npos : j - from);
 }
-std::string quoted_after(const std::string& s, const char* marker) {   // text between the first pair of '...' after marker
+std::string quoted_after(const std::string& s, const char* marker) {
     const size_t i = s.find(marker);
     if (i == std::string::npos) return std::string();
     const size_t a = s.find('\'', i + std::strlen(marker));
@@ -475,7 +445,6 @@ std::string file_size_text(const std::string& path) {
     return ec ? std::string("unknown size") : fmt_size(sz);
 }
 
-// A diagnostic block ("  file:line:col  error|warning", dashes, message, ...).
 bool classify_diag(const State& st, bool is_error, const std::string& file, const std::string& line, const std::string& col,
                    const std::string& msg, Hit& h) {
     h.f.set("file", base_name(file)).set("line", line).set("col", col).set("name", "");
@@ -517,6 +486,7 @@ bool classify_diag(const State& st, bool is_error, const std::string& file, cons
         if (contains(msg, "expected '&&' but got '&'") || contains(msg, "expected '||' but got '|'")) return id("syntax.single.and.or");
         if (contains(msg, "unterminated string literal")) return id("syntax.unterminated.string");
         if (contains(msg, "'elif' isn't CSy")) return id("syntax.elif");
+        if (contains(msg, "has no member '")) { h.f.set("name", between(msg, "has no member '", "'")); return id("runtime.unknown.builtin"); }
         if (contains(msg, "unexpected '::ext'")) return id("syntax.stray.ext");
         if (contains(msg, "too many errors in this file")) return id("syntax.too.many.errors");
         if (contains(msg, "nesting depth exceeded")) { h.f.set("limit", digits_after(msg, "exceeded (")); return id("syntax.too.deep"); }
@@ -538,7 +508,6 @@ bool classify_diag(const State& st, bool is_error, const std::string& file, cons
         return id("check.other");
     }
 
-    // warnings
     if (starts_with(msg, "unknown module '")) { h.f.set("name", quoted_after(msg, "unknown module")); return id("module.unknown"); }
     if (contains(msg, "' takes ") && contains(msg, "but this call passes")) {
         h.f.set("name", quoted_after(msg, "")).set("count", digits_after(msg, "this call passes"));
@@ -558,7 +527,6 @@ bool classify_diag(const State& st, bool is_error, const std::string& file, cons
     return id("warn.other");
 }
 
-// A single "error: ..." or "warning: ..." line.
 bool classify_plain(const State& st, bool is_error, const std::string& msg, Hit& h) {
     auto id = [&](const char* s) { h.id = s; return true; };
     h.f.set("file", st.subject_name);
@@ -628,10 +596,6 @@ bool classify_plain(const State& st, bool is_error, const std::string& msg, Hit&
     return false;
 }
 
-// ------------------------------------------------------------------------------------------------------
-// The line catcher. Everything written goes through to the real stream unchanged and at once; after a
-// factual line (or after a whole diagnostic block) one conversation line may be added.
-// ------------------------------------------------------------------------------------------------------
 struct Tap : public std::streambuf {
     State& st;
     std::streambuf* target;
@@ -691,8 +655,6 @@ struct Tap : public std::streambuf {
     }
 
     void plain_line(const std::string& raw_line, std::string& out) {
-        // On a terminal a progress bar can sit in front of a message on the same line (it is redrawn with \r),
-        // so when the line contains \r a marker is also accepted after that text.
         const bool progress = raw_line.find('\r') != std::string::npos;
         auto at = [&](const char* marker) -> size_t {
             if (starts_with(raw_line, marker)) return 0;
@@ -754,7 +716,6 @@ struct Tap : public std::streambuf {
         }
     }
 
-    // Is this line "  file:line:col  error|warning|note"?
     static bool parse_header(const std::string& l, std::string& file, std::string& line, std::string& col, std::string& kind) {
         if (l.size() < 12 || l[0] != ' ' || l[1] != ' ') return false;
         for (const char* k : {"error", "warning", "note"}) {
@@ -785,7 +746,7 @@ struct Tap : public std::streambuf {
         size_t pos = 0;
         while (pos < chunk.size()) {
             const size_t nl = chunk.find('\n', pos);
-            if (nl == std::string::npos) {   // an unfinished line: pass it on at once, keep it to classify later
+            if (nl == std::string::npos) {
                 out.append(chunk, pos, std::string::npos);
                 partial.append(chunk, pos, std::string::npos);
                 break;
@@ -820,7 +781,6 @@ struct Tap : public std::streambuf {
                     diag.insert_at = out.size();
                     continue;
                 } else {
-                    // errors/warnings summary footer closes the block
                     if (contains(line, " error(s), ") && contains(line, " warning(s)")) { finish_diag(out); continue; }
                     if (!line.empty()) diag.insert_at = out.size();
                     continue;
@@ -843,14 +803,10 @@ struct Tap : public std::streambuf {
     }
 };
 
-// ------------------------------------------------------------------------------------------------------
-// Interrupt (Ctrl C): a signal handler can only call a few functions, so the line is chosen before the
-// interrupt and written with write(2). {time} is formatted by hand from a monotonic clock.
-// ------------------------------------------------------------------------------------------------------
 struct InterruptPlan {
     char text[1536];
     uint16_t seg_end[9];
-    int segs = 0;          // number of text segments; a time value goes between consecutive segments
+    int segs = 0;
     bool armed = false;
     struct timespec start;
 };
@@ -892,11 +848,10 @@ void arm_interrupt(State& st) {
     const Table::Sit* sit = st.table.find("run.interrupted");
     if (!sit || sit->count == 0) return;
     Fields f;
-    f.set("file", st.subject_name).set("time", "\x01");   // \x01 marks where the time goes
+    f.set("file", st.subject_name).set("time", "\x01");
     std::string line = pick_line(st, "run.interrupted", f);
     if (line.empty()) return;
     std::string full = "\n" + gray(st, 2, line);
-    // split at each \x01 marker
     InterruptPlan& p = g_interrupt;
     size_t used = 0;
     p.segs = 0;
@@ -916,9 +871,6 @@ void arm_interrupt(State& st) {
     res::set_signal_hook(&interrupt_hook);
 }
 
-// ------------------------------------------------------------------------------------------------------
-// Folders, config, installing the catcher
-// ------------------------------------------------------------------------------------------------------
 fs::path cwd_root() {
     std::error_code ec;
     fs::path dir = fs::current_path(ec);
@@ -940,8 +892,6 @@ fs::path abs_dir_of(const std::string& arg) {
     return p.parent_path();
 }
 
-// P2: the project folder for a run is the folder of the first input (the project.csp, the source file or
-// the object); nothing named at all means the current project.
 fs::path provisional_root(int argc, char** argv) {
     static const char* with_value[] = {"-o", "--threads", "--run-threads", "-j", "--memory-limit"};
     for (int i = 1; i < argc; ++i) {
@@ -959,7 +909,6 @@ fs::path provisional_root(int argc, char** argv) {
     return cwd_root();
 }
 
-// Reads "cooler_compiler" from csyconf.json. Absent, unreadable or anything but true means off.
 bool conf_value(const fs::path& conf, bool& present) {
     present = false;
     std::string raw;
@@ -976,7 +925,6 @@ bool conf_value(const fs::path& conf, bool& present) {
     return raw.compare(i, 4, "true") == 0;
 }
 
-// Writes "cooler_compiler": value into csyconf.json, keeping everything else in the file. false on failure.
 bool conf_write(const fs::path& conf, bool value, std::string& why) {
     const std::string lit = value ? "true" : "false";
     std::string raw;
@@ -1048,13 +996,10 @@ Hash128 hash_of_path(const std::string& p) {
     return hash128(abs.string());
 }
 
-// ------------------------------------------------------------------------------------------------------
-// What the memory lets the compiler notice
-// ------------------------------------------------------------------------------------------------------
 bool same(const Hash128& a, const Hash128& b) { return a.a == b.a && a.b == b.b; }
 
 struct History {
-    std::vector<const Rec*> attempts;   // oldest first
+    std::vector<const Rec*> attempts;
     const Rec* last_enable = nullptr;
 };
 History history_of(const Mem& m) {
@@ -1073,7 +1018,6 @@ std::string sit_name(const State& st, uint32_t hash) {
     return "an error";
 }
 
-// The situation spoken before the attempt (nothing known about the result yet).
 bool start_situation(State& st, std::string& id, Fields& f) {
     const History h = history_of(st.mem);
     const int64_t now = now_unix();
@@ -1102,29 +1046,24 @@ bool start_situation(State& st, std::string& id, Fields& f) {
     return false;
 }
 
-// The situation spoken after the attempt, from the result and the history before it.
 bool end_situation(State& st, bool success, std::string& id, Fields& f) {
     const History h = history_of(st.mem);
     const auto& A = h.attempts;
     f.set("file", st.subject_name);
     const std::string err_name = st.first_error_id.empty() ? "an error" : st.first_error_id;
-    // newest record on this path (P5: the "after a change" situations recognise a file by its path)
     const Rec* last_on_path = nullptr;
     for (auto it = A.rbegin(); it != A.rend(); ++it) if (same((*it)->path, st.path_hash)) { last_on_path = *it; break; }
-    // length of the run of failures / successes at the end of the history (any files)
     int fail_run = 0, ok_run = 0;
     for (auto it = A.rbegin(); it != A.rend() && !ok_rec(**it); ++it) ++fail_run;
     for (auto it = A.rbegin(); it != A.rend() && ok_rec(**it); ++it) ++ok_run;
     const int64_t now = now_unix();
 
     if (success) {
-        // own.a.1: the first success after `csyc enable ccm`
         if (h.last_enable) {
             bool success_after = false;
             for (const Rec* r : A) if (r->time >= h.last_enable->time && ok_rec(*r)) success_after = true;
             if (!success_after) { id = "own.a.1"; return true; }
         }
-        // own.b.1: an error that repeated on this path is gone
         if (last_on_path && !ok_rec(*last_on_path) && last_on_path->sit != 0) {
             int repeats = 0;
             for (auto it = A.rbegin(); it != A.rend(); ++it) {
@@ -1138,7 +1077,6 @@ bool end_situation(State& st, bool success, std::string& id, Fields& f) {
                 return true;
             }
         }
-        // the same contents failed before and now succeed
         if (st.has_content) {
             int failed_before = 0;
             const Rec* newest = nullptr;
@@ -1160,7 +1098,6 @@ bool end_situation(State& st, bool success, std::string& id, Fields& f) {
         return false;
     }
 
-    // failure
     if (last_on_path && !ok_rec(*last_on_path)) {
         const bool contents_same = st.has_content && (last_on_path->flags & kHasContent) && same(last_on_path->content, st.content_hash);
         int on_path_failures = 1;
@@ -1197,14 +1134,10 @@ void load_memory(State& st) {
     st.mem_status = load_mem(st.root / "ccm_mem.bin", st.mem);
 }
 
-}  // namespace
+}
 
-// ======================================================================================================
-// Memory write and the commands
-// ======================================================================================================
 namespace {
 
-// Adds a record (if any) and replays this run's line picks into the freshly read memory, under the lock.
 bool write_memory(State& st, const Rec* record) {
     const fs::path file = st.root / "ccm_mem.bin";
     MemLock lock(st.root / "ccm_mem.lock");
@@ -1234,8 +1167,6 @@ State command_state() {
     return st;
 }
 
-// The commands always speak their own situations (ccm.*) when the table is usable, on stdout after the
-// factual line. Nothing else is ever spoken while the Cooler Compiler is off.
 void speak_command(State& st, const char* id, const Fields& f) {
     if (st.table.sits.empty()) return;
     st.on = true;
@@ -1252,7 +1183,7 @@ void save_command_picks(State& st) {
     if (!st.picks.empty()) write_memory(st, nullptr);
 }
 
-}  // namespace
+}
 
 int handle_command(int argc, char** argv) {
     if (argc < 2) return -1;
@@ -1293,7 +1224,7 @@ int handle_command(int argc, char** argv) {
             std::cout << "[csy] the Cooler Compiler is now on (" << conf.string() << ")" << std::endl;
             if (broken) table_notice(st);
             speak_command(st, "ccm.enabled", none);
-            Rec marker;   // so the first success after enabling can be noticed
+            Rec marker;
             marker.type = kEnableMarker;
             marker.time = now_unix();
             if (st.mem_status != MemStatus::Broken) write_memory(st, &marker);
@@ -1307,14 +1238,13 @@ int handle_command(int argc, char** argv) {
                 return 0;
             }
             std::cout << "[csy] switching the Cooler Compiler off (" << conf.string() << ")" << std::endl;
-            speak_command(st, "ccm.disabled", none);   // the goodbye comes before it is switched off
+            speak_command(st, "ccm.disabled", none);
             std::string why;
             if (!conf_write(conf, false, why)) { std::cerr << "error: " << why << "\n"; return 1; }
             save_command_picks(st);
             return 0;
         }
 
-        // csyc wipe --ccm-mem [--yes]
         if (st.mem_status == MemStatus::Absent || (st.mem_status == MemStatus::Ok && st.mem.recs.empty())) {
             std::cout << "[csy] the Cooler Compiler memory is empty, nothing to wipe" << std::endl;
             speak_command(st, "ccm.memory.empty", none);
@@ -1331,7 +1261,7 @@ int handle_command(int argc, char** argv) {
             std::getline(std::cin, answer);
             const size_t b = answer.find_first_not_of(" \t\r\n"), e = answer.find_last_not_of(" \t\r\n");
             const std::string t = b == std::string::npos ? std::string() : answer.substr(b, e - b + 1);
-            if (!(t == "y" || t == "Y")) {   // C19: anything that is not y counts as no
+            if (!(t == "y" || t == "Y")) {
                 std::cout << "[csy] nothing was wiped" << std::endl;
                 speak_command(st, "ccm.cancelled", none);
                 save_command_picks(st);
@@ -1343,7 +1273,7 @@ int handle_command(int argc, char** argv) {
         fs::remove(st.root / "ccm_mem.bin", ec);
         if (ec) { std::cerr << "error: cannot remove ccm_mem.bin: " << ec.message() << "\n"; return 1; }
         std::cout << "[csy] the Cooler Compiler memory was wiped" << std::endl;
-        st.picks.clear();   // the used-line slots live in the memory file, so they are gone too
+        st.picks.clear();
         speak_command(st, "ccm.wiped", none);
         return 0;
     } catch (const std::exception& e) {
@@ -1357,7 +1287,7 @@ void begin(int argc, char** argv) {
         if (g_state) return;
         const fs::path root = provisional_root(argc, argv);
         bool present = false;
-        if (!conf_value(root / "csyconf.json", present)) return;   // off: nothing else is opened or installed
+        if (!conf_value(root / "csyconf.json", present)) return;
         std::unique_ptr<State> st(new State());
         st->root = root;
         st->tty_out = ::isatty(1) != 0;
@@ -1369,7 +1299,6 @@ void begin(int argc, char** argv) {
         st->orig_err = std::cerr.rdbuf();
         bool broken = false;
         if (!load_table_for(*st, broken)) {
-            // C4: tell the user once, then compile normally
             if (st->tty_err)
                 std::cerr << "note: the Cooler Compiler is on but '" << (root / "ccm_table.bin").string()
                           << "' is missing or damaged; compiling without it\n";
@@ -1384,7 +1313,6 @@ void begin(int argc, char** argv) {
         install(*st);
         g_state = st.release();
     } catch (...) {
-        // never let this module stop a build
         if (g_state) { uninstall(*g_state); g_state = nullptr; }
     }
 }
@@ -1404,7 +1332,6 @@ void set_subject(const std::string& entry_path, bool run_mode, bool final_call) 
         st.has_content = read_file_bounded(entry_path, kMaxHashedBytes, raw, too_big);
         if (st.has_content) st.content_hash = hash128(raw);
         const uint64_t bytes = raw.size();
-        // spoken before the compile starts: nothing is known about the result yet
         Fields f;
         f.set("file", st.subject_name);
         if (st.has_content && bytes >= kSourceBigBytes && !run_mode) {
@@ -1431,7 +1358,7 @@ void user_code(bool running) {
         if (running) {
             st.run_start = Clock::now();
             st.run_started = true;
-            uninstall(st);   // the user's program prints straight to the real streams
+            uninstall(st);
         } else {
             install(st);
         }
@@ -1487,18 +1414,14 @@ void finish(int exit_code) {
     } catch (...) {}
     g_interrupt.armed = false;
     res::set_signal_hook(nullptr);
-    // the taps stay allocated: another thread may still hold a pointer to them while the process ends
     g_state = nullptr;
 }
 
-// ------------------------------------------------------------------------------------------------------
-// The shipped table: where it lives, and `csyc init` putting a copy in a new project.
-// ------------------------------------------------------------------------------------------------------
 std::string default_table_path() {
     std::vector<fs::path> dirs;
     std::error_code ec;
     if (const char* env = std::getenv("CSYC_DATA_DIR"); env && *env) {
-        dirs.push_back(fs::path(env));   // set: only this folder is searched
+        dirs.push_back(fs::path(env));
     } else {
         const fs::path self = fs::read_symlink("/proc/self/exe", ec);
         if (!ec) {
@@ -1531,5 +1454,6 @@ TableCopy copy_default_table(const std::string& folder, std::string& detail) {
     return TableCopy::Created;
 }
 
-}  // namespace ccm
-}  // namespace csy
+}
+}
+

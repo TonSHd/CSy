@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lexer.hpp"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -8,7 +9,6 @@
 
 namespace csy {
 
-// fwd
 struct Expr;
 struct Stmt;
 using ExprPtr = std::shared_ptr<Expr>;
@@ -41,28 +41,23 @@ struct Expr {
 
     std::string name;
 
-    // bin
     TokenType op = TokenType::END_OF_FILE;
     ExprPtr left;
     ExprPtr right;
     ExprPtr operand;
 
-    // assign and compound assign
     ExprPtr target;
     ExprPtr value;
 
     ExprPtr callee;
     std::vector<ExprPtr> args;
 
-    // Member
     ExprPtr object;
 
     ExprPtr index;
 
-    // vector lit
     std::vector<ExprPtr> elements;
 
-    // dict lit
     std::vector<std::pair<ExprPtr, ExprPtr>> dict_pairs;
 };
 
@@ -75,7 +70,7 @@ inline ExprPtr make_expr(ExprKind k, const NodeTok& t) {
 
 
 enum class StmtKind {
-    Import, // #inc <mod> as <als>
+    Import,
     Connect,
     Explain,
     DirectiveAlias,
@@ -159,3 +154,4 @@ struct Module {
 };
 
 }
+

@@ -1,4 +1,3 @@
-// Written by Grok
 
 #include "tui.hpp"
 #include "value.hpp"
@@ -25,9 +24,9 @@ void restore_terminal() {
         tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_termios);
         g_raw_active = false;
     }
-    std::cout << "\x1b[?25h";    // show cursor, in case it was hidden
-    std::cout << "\x1b[?1049l";  // leave the alternate screen buffer, if entered
-    std::cout << "\x1b[0m";      // reset colors/style
+    std::cout << "\x1b[?25h";
+    std::cout << "\x1b[?1049l";
+    std::cout << "\x1b[0m";
     std::cout.flush();
 }
 
@@ -49,7 +48,7 @@ void write_esc(const std::string& seq) {
     std::cout << seq;
 }
 
-} // namespace
+}
 
 void register_tui_builtins(VM& vm) {
     auto& builtins = vm.builtins_table();
@@ -86,8 +85,6 @@ void register_tui_builtins(VM& vm) {
         return Value::make_none();
     };
 
-    // Generic SGR code - bc::tprint-style escape hatch for anything not
-    // covered by the named helpers below (e.g. 7 for reverse video).
     builtins["tui_color"] = [](VM&, std::vector<Value>& args) -> Value {
         if (!args.empty()) {
             long long code = args[0].type == Value::Int ? args[0].int_val : (long long)args[0].float_val;
@@ -108,9 +105,6 @@ void register_tui_builtins(VM& vm) {
         return Value::make_none();
     };
 
-    // True-color (24-bit) fg/bg - every modern terminal emulator
-    // supports this; there's no reason to limit a new module to the
-    // old 16/256-color palettes.
     auto rgb_seq = [](int base, std::vector<Value>& args) -> std::string {
         auto comp = [&](size_t i) -> int {
             if (i >= args.size()) return 0;
@@ -157,10 +151,6 @@ void register_tui_builtins(VM& vm) {
         return Value::make_vec(std::move(v));
     };
 
-    // Character-at-a-time, no local echo - needed for tui::key() below
-    // to see a keypress before Enter, and for a drawn interface not to
-    // have the user's own typing show up over it. See restore_terminal
-    // for why this is always safe to turn on.
     builtins["tui_raw_on"] = [](VM&, std::vector<Value>&) -> Value {
         ensure_cleanup_registered();
         if (!g_raw_active) {
@@ -184,12 +174,6 @@ void register_tui_builtins(VM& vm) {
         return Value::make_none();
     };
 
-    // Non-blocking: returns "" immediately if nothing's been typed since
-    // the last call, otherwise the one character read. Meant to be
-    // polled from inside a running loop (a search, an animation, ...)
-    // without ever pausing it waiting on input - call tui::raw_on()
-    // first, or this will only ever see a key after Enter, same as
-    // ordinary terminal input.
     builtins["tui_key"] = [](VM&, std::vector<Value>&) -> Value {
         fd_set fds;
         FD_ZERO(&fds);
@@ -205,4 +189,5 @@ void register_tui_builtins(VM& vm) {
     };
 }
 
-} // namespace csy
+}
+

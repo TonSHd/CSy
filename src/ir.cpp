@@ -135,7 +135,6 @@ std::string disassemble(const IRModule& mod) {
             else if (ins.op == Op::PUSH_FUNC) ss << " fn#" << ins.arg;
             else if (ins.op == Op::PUSH_BUILTIN) ss << " " << mod.builtin_names[ins.arg];
             else if (ins.op == Op::CALL_NATIVE) {
-                // fib was pain.
                 int builtin_idx = ins.arg / 1000;
                 int nargs = ins.arg % 1000;
                 if (builtin_idx >= 0 && builtin_idx < (int)mod.builtin_names.size()) {
@@ -161,3 +160,4 @@ std::string disassemble(const IRModule& mod) {
 }
 
 }
+

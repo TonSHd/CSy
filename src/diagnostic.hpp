@@ -62,3 +62,4 @@ std::string format_diag(const Diagnostic& d, const std::string& source,
 std::string get_line(const std::string& source, int line);
 
 }
+

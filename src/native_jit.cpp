@@ -37,7 +37,7 @@ void dbg(const std::string& msg) {
     if (debug_on()) fprintf(stderr, "[csy][jit-debug] %s\n", msg.c_str());
 }
 
-enum class MathKind { AlwaysFloat1, AlwaysFloat2, AlwaysFloat3, Promote2 };
+enum class MathKind { AlwaysFloat1, AlwaysFloat2, AlwaysFloat3, Promote2, Pred1 };
 struct MathBuiltin { MathKind kind; std::string c_expr_template; };
 
 const std::unordered_map<std::string, MathBuiltin>& math_whitelist() {
@@ -66,9 +66,11 @@ const std::unordered_map<std::string, MathBuiltin>& math_whitelist() {
         {"tanh_deriv",    {MathKind::AlwaysFloat1, "csy_tanh_deriv({0})"}},
         {"atan2", {MathKind::AlwaysFloat2, "atan2({0}, {1})"}},
         {"pow",   {MathKind::AlwaysFloat2, "pow({0}, {1})"}},
-        {"clamp", {MathKind::AlwaysFloat3, "fmax({1}, fmin({0}, {2}))"}},
+        {"clamp", {MathKind::AlwaysFloat3, "csy_clamp({0}, {1}, {2})"}},
         {"max",   {MathKind::Promote2, ""}},
         {"min",   {MathKind::Promote2, ""}},
+        {"isnan", {MathKind::Pred1, "(isnan({0}) != 0)"}},
+        {"isinf", {MathKind::Pred1, "(isinf({0}) != 0)"}},
     };
     return m;
 }
@@ -80,8 +82,6 @@ const char* kPreamble = R"PRE(
 typedef struct { double number; long long ival; double* data; long long length; int is_array; } CsyNativeArg;
 typedef union { long long i; double f; } CsyRet;
 
-/* range(x) iteration count for a float bound: same coercion as the VM's
-   __range_bound builtin (never negative; NaN/huge handled without UB). */
 static long long csy_bound_f(double d) {
     if (!(d > 0.0)) return 0;
     if (d >= 9.2e18) return LLONG_MAX;
@@ -108,6 +108,7 @@ static void csy_array_compound(double* data, long long length, long long index,
     data[index] += subtract ? -value : value;
 }
 
+static double csy_clamp(double x, double lo, double hi) { if (x != x || lo != lo || hi != hi) return __builtin_nan(""); return fmax(lo, fmin(x, hi)); }
 static double csy_sign(double x) { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 static double csy_sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
 static double csy_relu(double x) { return x > 0.0 ? x : 0.0; }
@@ -135,10 +136,6 @@ static long long csy_safe_mod_i(long long a, long long b, int* err) {
     return a % b;
 }
 
-/* *__err is only ever set, never cleared once set - see native_jit.cpp's
-   comment on error propagation: a division-by-zero anywhere in the call
-   tree must survive to be reported at the top, even if sibling
-   sub-expressions keep computing (wastefully but harmlessly) afterward. */
 static double csy_safe_div_f(double a, double b, int* err) {
     if (b == 0.0) { if (*err == 0) *err = 1; return 0.0; }
     return a / b;
@@ -149,58 +146,37 @@ static long long csy_safe_div_i(long long a, long long b, int* err) {
     return a / b;
 }
 
-/* Recursion guard: native frames are tiny compared to the interpreter's,
-   so this can go much deeper than the interpreter's own limit (3000) and
-   still stay safely inside a typical 8MB stack. */
 #define CSY_MAX_NATIVE_DEPTH 20000
 )PRE";
 
 }
 
-// Written by Grok, Claude
 
-// ============================================================
-// Stage 1: eligibility
-// ============================================================
 
 enum class NType { Int, Float, Array };
 
-// One FnInfo per *instance*: a function compiled for one specific combination
-// of argument types (its "signature"). One letter per parameter:
-//   I  int
-//   F  float that is a float at run time, always
-//   M  float-typed but possibly an int at run time (a variable the program
-//      assigns both ints and floats). Only ever used between native functions.
-//   A  f64_array
-// The same struct also describes a *source* function (the "base"), in which
-// case sig/key are empty; instances copy it.
 struct FnInfo {
     const Stmt* decl = nullptr;
     std::vector<std::string> param_names;
     size_t user_param_count = 0;
-    std::vector<std::string> global_params;  // read-only module globals, appended to the native ABI
+    std::vector<std::string> global_params;
     std::unordered_set<std::string> direct_global_reads;
     std::unordered_set<std::string> array_params;
-    std::unordered_set<std::string> calls_candidates;  // other candidate fn names called
+    std::unordered_set<std::string> calls_candidates;
     bool syntax_ok = false;
-    std::string why_syntax;     // why the scanner refused it (for --explain-native)
-    bool eligible = false;  // after call-graph closure
+    std::string why_syntax;
+    bool eligible = false;
 
-    // Instance identity.
-    const std::unordered_map<std::string, FnInfo>* bases = nullptr;  // every source function by name
+    const std::unordered_map<std::string, FnInfo>* bases = nullptr;
     std::string base_name;
     std::string sig;
-    std::string key;   // base_name + "$" + sig
-    int id = -1;       // assigned just before C emission
+    std::string key;
+    int id = -1;
 
-    // Filled in by type inference.
-    std::unordered_map<std::string, NType> local_types;  // includes params
-    // Which kinds of value each variable is ever assigned: bit 1 = an int,
-    // bit 2 = a float. A float-typed variable with bit 1 set may hold an int
-    // at run time, exactly like in the interpreter - see definitely_float().
+    std::unordered_map<std::string, NType> local_types;
     std::unordered_map<std::string, int> seen;
     NType return_type = NType::Int;
-    int ret_seen = 0;   // same bits, for the values this function returns
+    int ret_seen = 0;
     bool has_return = false;
     bool valid = true;
     std::string why_invalid;
@@ -217,15 +193,11 @@ bool returns_maybe_int(const FnInfo& f) {
     return f.return_type == NType::Float && (f.ret_seen & 1) != 0;
 }
 
-// Signature letter for one call argument, from the CALLER's point of view.
 char arg_sig_char(const InstMap& insts, const FnInfo& caller, const ExprPtr& a) {
     if (infer_expr_type(insts, caller, a) == NType::Int) return 'I';
     return definitely_float(insts, caller, a) ? 'F' : 'M';
 }
 
-// Which instance does this call expression invoke? Chosen purely from the
-// static types of the arguments in the caller, so the answer is the same
-// during inference, validation and C generation.
 bool callee_key(const InstMap& insts, const FnInfo& caller, const ExprPtr& call,
                 std::string& key_out, std::string* base_out = nullptr, std::string* sig_out = nullptr) {
     if (!call || call->kind != ExprKind::Call || !call->callee || call->callee->kind != ExprKind::Ident) return false;
@@ -253,10 +225,6 @@ bool callee_key(const InstMap& insts, const FnInfo& caller, const ExprPtr& call,
     return true;
 }
 
-// The single source of truth for "what type does this expression have, given
-// the current inferred types for locals/params and other instances' return
-// types". Used by inference (where types are still converging), validation and
-// C codegen (where they are final) - one implementation, so they cannot drift.
 NType infer_expr_type(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) {
     if (!e) return NType::Int;
     switch (e->kind) {
@@ -272,7 +240,7 @@ NType infer_expr_type(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
             if (e->op == TokenType::LT || e->op == TokenType::GT || e->op == TokenType::LE ||
                 e->op == TokenType::GE || e->op == TokenType::EQ || e->op == TokenType::NEQ ||
                 e->op == TokenType::AND || e->op == TokenType::OR) {
-                return NType::Int;  // bool-as-int; only reachable in a cond, never stored
+                return NType::Int;
             }
             NType l = infer_expr_type(insts, fn, e->left), r = infer_expr_type(insts, fn, e->right);
             return (l == NType::Float || r == NType::Float) ? NType::Float : NType::Int;
@@ -287,6 +255,7 @@ NType infer_expr_type(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
                     NType b = e->args.size() > 1 ? infer_expr_type(insts, fn, e->args[1]) : NType::Int;
                     return (a == NType::Float || b == NType::Float) ? NType::Float : NType::Int;
                 }
+                if (mit->second.kind == MathKind::Pred1) return NType::Int;
                 return NType::Float;
             }
             std::string key;
@@ -301,14 +270,6 @@ NType infer_expr_type(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
     }
 }
 
-// True when the expression is a float at run time on EVERY path, in the
-// interpreter too. The interpreter is dynamically typed: `s = 0; ...; s += 0.5`
-// leaves s an int until the float assignment actually runs. The native code
-// gives s one static type (float), so the two can differ in the TYPE of such a
-// value (never in its numeric value). That only changes behaviour where int and
-// float semantics differ - division - so we track precisely which expressions
-// are certain to be floats and refuse to compile a division whose result might
-// differ (see instance_expressions_ok).
 bool definitely_float(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) {
     if (!e) return false;
     switch (e->kind) {
@@ -331,6 +292,7 @@ bool definitely_float(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
         case ExprKind::Call: {
             auto mit = math_whitelist().find(e->callee->name);
             if (mit != math_whitelist().end()) {
+                if (mit->second.kind == MathKind::Pred1) return false;
                 if (mit->second.kind != MathKind::Promote2) return true;
                 return (e->args.size() > 0 && definitely_float(insts, fn, e->args[0])) ||
                        (e->args.size() > 1 && definitely_float(insts, fn, e->args[1]));
@@ -347,7 +309,6 @@ bool definitely_float(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
     }
 }
 
-// Visit every node of an expression tree; false as soon as `pred` rejects one.
 bool expr_tree_all(const ExprPtr& e, const std::function<bool(const ExprPtr&)>& pred) {
     if (!e) return true;
     if (!pred(e)) return false;
@@ -362,13 +323,9 @@ bool expr_tree_all(const ExprPtr& e, const std::function<bool(const ExprPtr&)>& 
     return true;
 }
 
-// Apply `pred` (a whole-expression-tree check) to every expression of every
-// statement in a body, recursing into nested bodies.
 bool all_stmt_exprs(const std::vector<StmtPtr>& body, const std::function<bool(const ExprPtr&)>& check) {
     for (const auto& s : body) {
         if (!s) continue;
-        // A `for` header is `range(bound)`; the scanner has already pinned that
-        // shape, so only the bound expression is a real expression to examine.
         const ExprPtr& iterable = s->kind == StmtKind::For && s->iterable && !s->iterable->args.empty()
                                       ? s->iterable->args[0] : s->iterable;
         if (!check(s->expr) || !check(s->cond) || !check(iterable) || !check(s->ret_value)) return false;
@@ -386,7 +343,6 @@ static std::string user_visible_name(const std::string& n) {
         const size_t us = n.find('_', 7);
         if (us != std::string::npos && us + 1 < n.size()) return user_visible_name(n.substr(us + 1));
     }
-    // private names the loop outliner gives a loop's own copy of a variable: `x__L40`
     const size_t mark = n.rfind("__L");
     if (mark != std::string::npos && mark > 0) {
         size_t e = mark + 3;
@@ -398,14 +354,7 @@ static std::string user_visible_name(const std::string& n) {
     return n;
 }
 
-// ---- Move 1b: ints that live in a double -------------------------------------------------
-// A variable that is an int on some paths and a float on others ("mixed") is kept as a
-// double plus a runtime tag. That is exact for small ints, but the interpreter's ints are
-// 64-bit with overflow errors, so native code would silently differ (no overflow error,
-// rounding above 2^53) wherever an int-capable value goes through double arithmetic or is
-// stored into a double. Rather than guess, such instances stay interpreted. What remains
-// native keeps one invariant: every int-tagged double is a small constant or a copy of one.
-constexpr long long kExactDoubleInt = 1LL << 53;   // below this every int is exactly a double
+constexpr long long kExactDoubleInt = 1LL << 53;
 
 bool int_constant_value(const ExprPtr& e, long long& out) {
     if (!e) return false;
@@ -437,9 +386,6 @@ bool small_int_constant(const ExprPtr& e) {
     return int_constant_value(e, v) && v > -kExactDoubleInt && v < kExactDoubleInt;
 }
 
-// Int parameters that the body turns into floats: the native entry converts the int to a double,
-// which is only exact below 2^53, so the entry wrapper rejects larger values (error 5, raised before
-// the function has done anything; the VM then runs the bytecode version instead).
 std::vector<size_t> entry_guard_params(const FnInfo& fn) {
     std::vector<size_t> out;
     for (size_t i = 0; i < fn.param_names.size() && i < fn.sig.size(); i++) {
@@ -449,7 +395,6 @@ std::vector<size_t> entry_guard_params(const FnInfo& fn) {
     return out;
 }
 
-// Statement-level conversions of an int into a double that may later be read as an int.
 bool conversions_ok(const InstMap& insts, const FnInfo& fn, const std::vector<StmtPtr>& body, std::string& why) {
     for (const auto& s : body) {
         if (!s) continue;
@@ -475,17 +420,6 @@ bool conversions_ok(const InstMap& insts, const FnInfo& fn, const std::vector<St
     return true;
 }
 
-// Reasons an otherwise-compilable instance must stay interpreted. Each of these
-// is a place where native and interpreted results could differ, so the rule is
-// "don't compile it" rather than "compile it and hope".
-//
-//  * `%` - the interpreter only defines it for two ints (anything else is
-//    `none`); C's `%`/fmod would compute a real, different answer.
-//  * `/` - int/int truncates but float division does not. If the static type
-//    says float yet neither operand is certain to be a float at run time, the
-//    interpreter might truncate where the native code would not.
-//  * array index - must be provably an int.
-//  * calls - arity must match the callee.
 bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string& why) {
     auto pred = [&](const ExprPtr& n) -> bool {
         if (n->kind == ExprKind::Binary && n->op == TokenType::PERCENT) {
@@ -507,7 +441,6 @@ bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string
             why = "indexes an f64_array with a non-int value";
             return false;
         }
-        // Move 1b: + - * where the result may be an int at run time but is computed as a double.
         if (n->kind == ExprKind::Binary &&
             (n->op == TokenType::PLUS || n->op == TokenType::MINUS || n->op == TokenType::STAR) &&
             infer_expr_type(insts, fn, n) == NType::Float && !definitely_float(insts, fn, n)) {
@@ -542,8 +475,6 @@ bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string
         }
         if (n->kind == ExprKind::Call && n->callee && n->callee->kind == ExprKind::Ident &&
             !math_whitelist().count(n->callee->name)) {
-            // The callee turns one of its int parameters into a float. The VM guards that at the entry, but a
-            // native caller would hand it the int directly, so only small constants are allowed there.
             std::string key;
             if (callee_key(insts, fn, n, key)) {
                 for (size_t gi : entry_guard_params(insts.at(key)))
@@ -574,32 +505,24 @@ bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string
         return true;
     };
     if (!all_stmt_exprs(fn.decl->body, [&](const ExprPtr& e) { return expr_tree_all(e, pred); })) return false;
-    // (An int parameter turned into a float is guarded at the native entry, see entry_guard_params; native
-    // callers passing a possibly-large int to such a parameter are refused in the call check above.)
     return conversions_ok(insts, fn, fn.decl->body, why);
 }
 
 
 
-// ============================================================
-// Stage 1: eligibility scanner (syntax subset)
-// ============================================================
 
 class EligibilityScanner {
 public:
     explicit EligibilityScanner(const std::unordered_map<std::string, FnInfo>& all_candidates)
         : candidates_(all_candidates) {}
 
-    // Populates fn.calls_candidates and returns whether the syntax itself
-    // (ignoring, for now, whether callees turn out eligible) is in the
-    // numeric-only subset.
     bool scan(FnInfo& fn) {
         current_fn_ = &fn;
         calls_.clear();
         ok_ = true;
         why_.clear();
         active_for_.clear();
-        for (const auto& s : fn.decl->body) scan_stmt(s, /*cond_ctx=*/false);
+        for (const auto& s : fn.decl->body) scan_stmt(s,  false);
         fn.calls_candidates = calls_;
         return ok_;
     }
@@ -608,7 +531,7 @@ private:
     const std::unordered_map<std::string, FnInfo>& candidates_;
     const FnInfo* current_fn_ = nullptr;
     std::unordered_set<std::string> calls_;
-    std::vector<std::string> active_for_;      // loop variables of the `for` loops currently being scanned
+    std::vector<std::string> active_for_;
     bool ok_ = true;
 
     std::string why_;
@@ -675,9 +598,6 @@ private:
                 for (const auto& bs : s->body) scan_stmt(bs, cond_ctx);
                 break;
             case StmtKind::For: {
-                // Only the `for i in thru N:` shape (desugared by the
-                // parser into iterable == range(N)) - not general vector
-                // iteration.
                 auto& it = s->iterable;
                 if (!it || it->kind != ExprKind::Call || !it->callee ||
                     it->callee->kind != ExprKind::Ident || it->callee->name != "range" ||
@@ -686,9 +606,6 @@ private:
                     return;
                 }
                 scan_expr(it->args[0], false);
-                // The interpreter keeps a `for` loop's hidden counters under the loop variable's NAME, so a
-                // loop nested inside another loop with the same variable overwrites the outer loop's counters
-                // and ends it early. Native code would run both loops in full, so such code stays interpreted.
                 for (const auto& v : active_for_)
                     if (v == s->loop_var) {
                         const std::string msg =
@@ -716,13 +633,6 @@ private:
         }
     }
 
-    // `cond_ctx`: true if this expression's value is used directly as a
-    // branch condition (an If/orf/While test, or a sub-expression of
-    // && / || / ! that itself bottoms out in one) - the only place a
-    // comparison or boolean value is allowed to appear. Everywhere else
-    // (assigned, returned, passed as an argument) a bool would need a
-    // third native type this pass doesn't carry, so it's simplest and
-    // safest to just not allow it there.
     void scan_expr(const ExprPtr& e, bool cond_ctx) {
         if (!ok_ || !e) return;
         switch (e->kind) {
@@ -776,9 +686,6 @@ private:
                                      e->op == TokenType::PERCENT);
                 if (is_bool_op) {
                     if (!cond_ctx) { fail("stores or returns a comparison/boolean result (only allowed as an if/while condition)"); return; }
-                    // && / || operands are themselves boolean context; a
-                    // comparison's own operands (e.g. either side of `<`)
-                    // are ordinary arithmetic values, not booleans.
                     bool operand_cond = (e->op == TokenType::AND || e->op == TokenType::OR);
                     scan_expr(e->left, operand_cond);
                     scan_expr(e->right, operand_cond);
@@ -791,15 +698,32 @@ private:
                 break;
             }
             case ExprKind::Call: {
-                if (!e->callee || e->callee->kind != ExprKind::Ident) { fail(); return; }
+                if (!e->callee || e->callee->kind != ExprKind::Ident) {
+                    if (e->callee && e->callee->kind == ExprKind::Member && math_whitelist().count(e->callee->name)) {
+                        fail(("calls " + e->callee->name + " through a module alias while the program also declares its own '" +
+                              e->callee->name + "'; native code cannot tell the two apart").c_str());
+                    } else if (e->callee && e->callee->kind == ExprKind::Member) {
+                        std::string hint = e->callee->name == "len"
+                            ? "; pass the length in as a number argument instead"
+                            : "";
+                        fail(("calls '" + e->callee->name + "' through a module name, and it is not a whitelisted math builtin" + hint).c_str());
+                    } else {
+                        fail();
+                    }
+                    return;
+                }
                 const std::string& name = e->callee->name;
                 auto mit = math_whitelist().find(name);
                 if (mit != math_whitelist().end()) {
-                    size_t want = mit->second.kind == MathKind::AlwaysFloat1 ? 1
+                    size_t want = (mit->second.kind == MathKind::AlwaysFloat1 || mit->second.kind == MathKind::Pred1) ? 1
                                 : mit->second.kind == MathKind::AlwaysFloat2 ? 2
                                 : mit->second.kind == MathKind::AlwaysFloat3 ? 3
-                                : 2; // Promote2
+                                : 2;
                     if (e->args.size() != want) { fail(); return; }
+                    if (mit->second.kind == MathKind::Pred1 && !cond_ctx) {
+                        fail("stores or returns a boolean result (only allowed as an if/while condition)");
+                        return;
+                    }
                 } else if (candidates_.count(name)) {
                     calls_.insert(name);
                     const FnInfo& callee = candidates_.at(name);
@@ -822,43 +746,28 @@ private:
             }
             case ExprKind::Assign:
             case ExprKind::CompoundAssign:
-                fail();  // only valid as a top-level statement, handled in scan_stmt
+                fail();
                 break;
         }
     }
 };
 
-// A function that doesn't return on every control path implicitly
-// returns `none` at the end, same as any other CSy function - but the
-// native ABI only has int/float, nothing that can represent `none`.
-// Silently returning 0 instead would be a real, dangerous divergence
-// from the interpreted behavior (caught by testing `if x > 0: rt x*x;
-// ::ext` called with a negative x - interpreted gives `none`, an
-// earlier version of this file gave `0`), so a function must be proven
-// to always hit an explicit `rt` before it's eligible at all. Loops are
-// conservatively treated as "might not return" even if their body always
-// does, since a `while`/`for` might execute zero times.
 bool always_returns(const std::vector<StmtPtr>& body) {
     for (const auto& s : body) {
         if (!s) continue;
         if (s->kind == StmtKind::Return) return true;
         if (s->kind == StmtKind::If) {
-            if (s->else_body.empty()) continue;  // no else -> might fall through
+            if (s->else_body.empty()) continue;
             if (!always_returns(s->then_body)) continue;
             bool all_elifs_return = std::all_of(s->elifs.begin(), s->elifs.end(),
                 [](const std::pair<ExprPtr, std::vector<StmtPtr>>& el) { return always_returns(el.second); });
             if (all_elifs_return && always_returns(s->else_body)) return true;
         }
-        // While/For/anything else: doesn't itself guarantee a return -
-        // keep scanning the rest of this statement list.
     }
     return false;
 }
 
 
-// ============================================================
-// Stage 2: type inference (per specialised instance)
-// ============================================================
 
 class TypeInferer {
 public:
@@ -867,8 +776,6 @@ public:
 
     bool overflowed() const { return overflow_; }
 
-    // Create (or find) the instance of `base` for argument signature `sig`.
-    // Returns its key, or "" if the instance cap has been reached.
     std::string ensure(const std::string& base, const std::string& sig) {
         const std::string key = base + "$" + sig;
         if (insts_.count(key)) return key;
@@ -884,7 +791,7 @@ public:
                 case 'A': fn.local_types[p] = NType::Array; break;
                 case 'I': fn.local_types[p] = NType::Int;   fn.seen[p] = 1; break;
                 case 'F': fn.local_types[p] = NType::Float; fn.seen[p] = 2; break;
-                default:  fn.local_types[p] = NType::Float; fn.seen[p] = 3; break;  // 'M'
+                default:  fn.local_types[p] = NType::Float; fn.seen[p] = 3; break;
             }
         }
         collect_locals(fn.decl->body, fn.local_types);
@@ -895,11 +802,9 @@ public:
     }
 
     void run() {
-        // Types only ever move up the lattice (Int -> Float; "seen" bits only get
-        // set), and the number of instances is capped, so this terminates.
         for (int iter = 0; iter < 10000; iter++) {
             changed_ = false;
-            for (size_t i = 0; i < order_.size(); i++) {  // order_ can grow while we iterate
+            for (size_t i = 0; i < order_.size(); i++) {
                 FnInfo& fn = insts_.at(order_[i]);
                 for (const auto& s : fn.decl->body) propagate_stmt(fn, s);
             }
@@ -944,8 +849,6 @@ private:
 
     NType type_of(FnInfo& fn, const ExprPtr& e) { return infer_expr_type(insts_, fn, e); }
 
-    // Record that `name` is assigned a value of type `t`; `certain_float` says
-    // the value is a float on every path (see definitely_float).
     void assign(FnInfo& fn, const std::string& name, NType t, bool certain_float) {
         auto it = fn.local_types.find(name);
         if (it == fn.local_types.end()) { fn.local_types[name] = t; changed_ = true; it = fn.local_types.find(name); }
@@ -955,8 +858,6 @@ private:
         if ((seen | bits) != seen) { seen |= bits; changed_ = true; }
     }
 
-    // Walk an expression only to make sure every user-function call has an
-    // instance for the argument types it is made with.
     void discover(FnInfo& fn, const ExprPtr& e) {
         expr_tree_all(e, [&](const ExprPtr& n) {
             if (n->kind == ExprKind::Call && n->callee && n->callee->kind == ExprKind::Ident &&
@@ -985,7 +886,6 @@ private:
             case StmtKind::ExprStmt:
                 if (s->expr && s->expr->kind == ExprKind::CompoundAssign && s->expr->target &&
                     s->expr->target->kind == ExprKind::Ident) {
-                    // x += v  stores x + v (or x - v)
                     const std::string& name = s->expr->target->name;
                     const NType tx = fn.local_types.count(name) ? fn.local_types[name] : NType::Int;
                     const NType tv = type_of(fn, s->expr->value);
@@ -1004,7 +904,7 @@ private:
                 for (const auto& bs : s->body) propagate_stmt(fn, bs);
                 break;
             case StmtKind::For:
-                assign(fn, s->loop_var, NType::Int, false);  // the loop variable always receives ints
+                assign(fn, s->loop_var, NType::Int, false);
                 for (const auto& bs : s->body) propagate_stmt(fn, bs);
                 break;
             case StmtKind::Return:
@@ -1022,7 +922,6 @@ private:
     }
 };
 
-// A bare `rt;` returns none in the interpreter; native code has no none.
 bool has_bare_return(const std::vector<StmtPtr>& body) {
     for (const auto& s : body) {
         if (!s) continue;
@@ -1033,16 +932,11 @@ bool has_bare_return(const std::vector<StmtPtr>& body) {
     return false;
 }
 
-// ============================================================
-// Stage 3: C codegen (one C function per instance)
-// ============================================================
 
 class CCodeGen {
 public:
     explicit CCodeGen(InstMap& insts) : fns_(insts) {}
 
-    // `emit_order`: keys of the instances to emit (ids already assigned).
-    // `exported`: the subset the VM may call directly.
     std::string generate(const std::vector<std::string>& emit_order,
                          const std::vector<std::string>& exported) {
         std::ostringstream out;
@@ -1123,8 +1017,6 @@ private:
     static std::string vname(const std::string& n) { return "v_" + n; }
     static std::string fname(const FnInfo& f) { return "csy_fn" + std::to_string(f.id); }
 
-    // Typed C signature: int params are `long long`, float params `double`,
-    // array params a pointer + length. Nothing is squeezed through a double.
     std::string signature(const FnInfo& fn) {
         std::ostringstream s;
         s << "static " << c_type(fn.return_type) << " " << fname(fn) << "(";
@@ -1141,7 +1033,6 @@ private:
         return s.str();
     }
 
-    // Exported wrapper with the uniform ABI the VM calls through.
     void emit_entry(std::ostringstream& out, const FnInfo& fn) {
         out << "static void csy_entry" << fn.id << "(const CsyNativeArg* a, int* err, int* rtag, CsyRet* out) {\n";
         for (size_t gi : entry_guard_params(fn))
@@ -1179,9 +1070,6 @@ private:
             (void)node;
             out << "  int __csy_call_tag_" << id << " = 0;\n";
         }
-        // Params become typed locals (a param assigned a float in the body is
-        // promoted, so the local may be wider than the parameter); every other
-        // local is declared up front because CSy is function-scoped.
         for (size_t i = 0; i < fn.param_names.size(); i++) {
             const std::string& p = fn.param_names[i];
             const NType t = fn.local_types.at(p);
@@ -1208,8 +1096,6 @@ private:
 
     void indent(std::ostringstream& out, int n) { for (int i = 0; i < n; i++) out << "  "; }
 
-    // "is this value truthy" exactly as the interpreter decides it (non-zero),
-    // for ints and floats alike - a plain (long long) cast would call 0.5 false.
     std::string truthy(FnInfo& fn, const ExprPtr& e) { return "((" + expr(fn, e) + ") != 0)"; }
 
     void emit_stmt(std::ostringstream& out, FnInfo& fn, const StmtPtr& s, int depth) {
@@ -1301,10 +1187,6 @@ private:
                 break;
             }
             case StmtKind::For: {
-                // The interpreter counts with a hidden index and *assigns* the loop
-                // variable from it each round: the body may overwrite the variable
-                // without affecting iteration, and afterwards it holds the last
-                // value assigned. A separate counter reproduces both.
                 const std::string lv = vname(s->loop_var);
                 const size_t id = temp_id_++;
                 const std::string bound = "__csy_bound_" + std::to_string(id);
@@ -1324,8 +1206,6 @@ private:
                 break;
             }
             case StmtKind::Return: {
-                // Evaluate first, then tag: nested calls inside the expression write
-                // to a scratch tag, never to ours.
                 const NType t = infer_expr_type(fns_, fn, s->ret_value);
                 indent(out, depth);
                 out << "{ " << c_type(fn.return_type) << " __r = (" << c_type(fn.return_type) << ")("
@@ -1361,13 +1241,11 @@ private:
         return std::string(helper) + "(" + left + ", " + right + ", __err)";
     }
 
-    // Shortest decimal text that reads back as exactly the same double - the
-    // default ostream precision (6 digits) silently changed every literal.
     static std::string float_literal(double v) {
         char buf[40];
         std::snprintf(buf, sizeof(buf), "%.17g", v);
         std::string s = buf;
-        if (s.find_first_of(".eEnN") == std::string::npos) s += ".0";  // keep it a C double
+        if (s.find_first_of(".eEnN") == std::string::npos) s += ".0";
         return s;
     }
 
@@ -1398,10 +1276,6 @@ private:
                     e->op == TokenType::LE ? "<=" : e->op == TokenType::GE ? ">=" :
                     e->op == TokenType::EQ ? "==" : e->op == TokenType::NEQ ? "!=" :
                     e->op == TokenType::AND ? "&&" : "||";
-                // `%` between doubles is not valid C - deliberately: validation
-                // guarantees both sides are ints here, and if that were ever
-                // violated the C compile would fail loudly (whole-program
-                // fallback to the interpreter) instead of computing a wrong value.
                 return "(" + expr(fn, e->left) + " " + op + " " + expr(fn, e->right) + ")";
             }
             case ExprKind::Call: {
@@ -1423,7 +1297,6 @@ private:
                     }
                     return "(" + t + ")";
                 }
-                // Call into the instance specialised for exactly these argument types.
                 std::string key;
                 callee_key(fns_, fn, e, key);
                 const FnInfo& callee = fns_.at(key);
@@ -1519,6 +1392,7 @@ private:
                 const std::string& name = e->callee->name;
                 auto mit = math_whitelist().find(name);
                 if (mit != math_whitelist().end()) {
+                    if (mit->second.kind == MathKind::Pred1) return "0";
                     if (mit->second.kind != MathKind::Promote2) return "1";
                     return "(" + tag_expr(fn, e->args[0]) + " | " + tag_expr(fn, e->args[1]) + ")";
                 }
@@ -1578,17 +1452,11 @@ void find_array_params_stmts(const std::vector<StmtPtr>& body,
     }
 }
 
-} // namespace
+}
 
-// ============================================================
-// Stage 4: compile + load
-// ============================================================
 
 namespace {
 
-// Two independent 64-bit FNV-1a passes (128 bits total): the cache key must
-// make an accidental collision between two different generated sources
-// practically impossible, and std::hash (64-bit, unspecified) did not.
 std::string hash_hex(const std::string& s) { return hash128_hex(s); }
 
 bool path_exists(const std::string& p) {
@@ -1597,8 +1465,6 @@ bool path_exists(const std::string& p) {
 }
 
 std::string cache_dir() {
-    // CSY_JIT_CACHE_DIR relocates the cache (read-only /tmp, containers, tests). The same
-    // ownership and permission checks apply wherever it is.
     const char* override_dir = std::getenv("CSY_JIT_CACHE_DIR");
     const std::string dir = (override_dir && *override_dir) ? std::string(override_dir)
                                                             : "/tmp/csy_native_jit-" + std::to_string(::geteuid());
@@ -1609,8 +1475,6 @@ std::string cache_dir() {
     return dir;
 }
 
-// The cache is content-addressed and otherwise grows forever. Drop entries
-// untouched for two weeks, and the oldest ones beyond a few hundred files.
 void prune_cache(const std::string& dir) {
     DIR* d = ::opendir(dir.c_str());
     if (!d) return;
@@ -1631,8 +1495,6 @@ void prune_cache(const std::string& dir) {
     }
 }
 
-// Write via a temp file and rename, so a crash or concurrent writer never leaves
-// a half-written file under the final (content-addressed) name.
 bool write_file_atomic(const std::string& path, const std::string& content) {
     const std::string tmp = path + ".tmp" + std::to_string(::getpid());
     res::register_temp_path(tmp);
@@ -1696,7 +1558,7 @@ int run_compiler(const std::vector<std::string>& command, const std::string& err
         ::execvp(args[0], args.data());
         _exit(127);
     }
-    res::set_active_child(child);  // an interrupted csyc stops the C compiler too
+    res::set_active_child(child);
     int status = 0;
     while (::waitpid(child, &status, 0) < 0) {
         if (errno == EINTR) continue;
@@ -1707,11 +1569,10 @@ int run_compiler(const std::vector<std::string>& command, const std::string& err
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 }
 
-} // namespace
+}
 
 namespace {
 
-// Mirrors the C struct emitted into every generated library.
 struct EntryRow {
     const char* name;
     const char* sig;
@@ -1726,7 +1587,6 @@ struct GlobalRow {
     int global_count;
 };
 
-// Keys of the user-function instances this instance calls (final types).
 std::vector<std::string> callee_instances(const InstMap& insts, const FnInfo& fn, bool& all_found) {
     std::vector<std::string> keys;
     all_found = true;
@@ -1745,20 +1605,6 @@ std::vector<std::string> callee_instances(const InstMap& insts, const FnInfo& fn
 }
 
 #ifdef CSY_HAVE_X64_BACKEND
-// Backend choice when a C compiler exists. The C path stays the default. The own x86-64 backend is
-// preferred only for functions with a proven, profitable vectorisable loop: one whose element-wise
-// fast path it emitted (the loop shape was proved safe, and a runtime check falls back to the scalar
-// loop whenever the proof does not hold). Native-to-native calls stay inside one library or one image,
-// so instances that call each other must share a backend: the unit is a connected component of the
-// native call graph. A component qualifies when
-//   1. at least one of its functions got a vector fast path, and
-//   2. none of its functions is recursive (a call cycle: the own backend pays a full call sequence), and
-//   3. every loop in it is a vector loop or contains one, so the time goes where the own backend wins.
-// Measured on this machine: the own backend is 1.3x-2.6x faster than the C path
-// on element-wise loops that read an array at several offsets or compute several operations, ties on
-// pure bandwidth-bound ones, and is about 10% slower only when the vector path never engages
-// (loops under 4 iterations, aliased arguments). Trip counts are unknown at compile time, so that
-// last risk is accepted and documented. CSY_NATIVE_BACKEND=c / =x64 still force one backend.
 std::unordered_set<std::string> own_backend_components(
         const InstMap& insts, const std::vector<std::string>& emit_order,
         const std::unordered_map<std::string, X64CodeGen::LoopStat>& stats) {
@@ -1778,7 +1624,6 @@ std::unordered_set<std::string> own_backend_components(
             parent[find(i)] = find(it->second);
         }
     }
-    // call cycles (including a function calling itself), found with an iterative depth-first search
     std::vector<char> color(n, 0), cyclic_node(n, 0);
     for (size_t root = 0; root < n; root++) {
         if (color[root]) continue;
@@ -1797,7 +1642,7 @@ std::unordered_set<std::string> own_backend_components(
     for (size_t i = 0; i < n; i++) {
         const size_t c = find(i);
         auto it = stats.find(emit_order[i]);
-        if (it == stats.end()) { disqualified[c] = true; continue; }     // unknown: keep the C path
+        if (it == stats.end()) { disqualified[c] = true; continue; }
         if (it->second.vector_loops > 0) has_vec[c] = true;
         if (it->second.other_loops > 0 || cyclic_node[i]) disqualified[c] = true;
     }
@@ -1822,8 +1667,6 @@ uint32_t sig_code(const std::string& sig) {
 
 constexpr size_t kMaxEmbeddedLibrary = 64u * 1024u * 1024u;
 
-// Builds (or finds in the cache) the shared library for `c_source`. Returns its
-// path, or "" with `why` set.
 std::string build_library(const std::string& c_source, size_t variant_count, std::string& why) {
     const std::string dir = cache_dir();
     if (dir.empty()) { why = "cannot create a private native JIT cache directory"; return {}; }
@@ -1831,16 +1674,11 @@ std::string build_library(const std::string& c_source, size_t variant_count, std
     std::vector<std::string> cmd;
     if (!cc_env || !*cc_env) cmd.emplace_back("cc");
     else if (!split_command_words(cc_env, cmd)) { why = "CC has unmatched quoting"; return {}; }
-    // No -ffast-math and no FMA contraction: the native code must produce the
-    // same floating-point results as the interpreter, bit for bit.
     const std::vector<std::string> flags = {"-O3", "-shared", "-fPIC", "-fno-math-errno", "-ffp-contract=off"};
     std::string key_material = c_source + "\n";
-    // CSY_JIT_CACHE_SALT lets tests and benchmarks force a cold cache without
-    // touching the shared cache directory.
     if (const char* salt = std::getenv("CSY_JIT_CACHE_SALT")) key_material += std::string("salt=") + salt + "\n";
     for (const auto& w : cmd) key_material += w + " ";
     for (const auto& f : flags) key_material += f + " ";
-    // Is there a C compiler at all? Say so before doing any work (and before announcing a compile).
     {
         const std::string& prog = cmd.front();
         bool found = false;
@@ -1894,7 +1732,6 @@ std::string build_library(const std::string& c_source, size_t variant_count, std
     return so_path;
 }
 
-// dlopens `so_path` and attaches its entry table to `ir.functions` by name.
 bool bind_library(const std::string& so_path, IRModule& ir, int& loaded, std::string& why) {
     void* lib = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!lib) { why = std::string("dlopen failed: ") + dlerror(); return false; }
@@ -1933,9 +1770,6 @@ bool bind_library(const std::string& so_path, IRModule& ir, int& loaded, std::st
                     break;
                 }
             }
-            // New libraries publish one metadata row per native entry. If a
-            // row is absent or malformed, skip it instead of binding a
-            // hidden-argument entry as if it had the legacy user arity.
             if (!found_metadata) continue;
         }
         if (user_nparams < 0 || num_globals < 0 || num_globals > (int)kMaxNativeParams ||
@@ -1960,9 +1794,6 @@ bool bind_library(const std::string& so_path, IRModule& ir, int& loaded, std::st
 }
 
 
-// A native function may only use its parameters and the locals it assigns itself. Reading a
-// name it never assigns means reading a module-level variable, which native code cannot see;
-// such a function must stay interpreted (and must not take the others down with it).
 void collect_assigned_names(const std::vector<StmtPtr>& body, std::unordered_set<std::string>& out) {
     for (const auto& s : body) {
         if (!s) continue;
@@ -1989,11 +1820,6 @@ void collect_assigned_names(const std::vector<StmtPtr>& body, std::unordered_set
     }
 }
 
-// Definite-assignment analysis. Native code starts every local at 0 while the interpreter starts it
-// at none, so a function is only native if every read of a local is preceded, on every path, by an
-// assignment (parameters count as assigned). Reads of names the function never assigns are module-
-// level variables, which native code cannot see. Loops are treated conservatively: what a loop body
-// assigns is not assumed afterwards (the body may run zero times).
 class AssignmentCheck {
 public:
     using Set = std::unordered_set<std::string>;
@@ -2047,7 +1873,6 @@ private:
         for (const auto& n : a) if (b.count(n)) out.insert(n);
         return out;
     }
-    // Analyses one branch from `entry`; returns the state at its end, or nullopt if the branch cannot fall through.
     bool branch(const std::vector<StmtPtr>& body, const Set& entry, bool& fall_through, Set& out) {
         out = entry;
         bool reachable = true;
@@ -2069,7 +1894,7 @@ private:
                             if (!expr(e->target->index, st) || !expr(e->target->object, st)) return false;
                         } else if (e->target->kind == ExprKind::Ident) {
                             const bool plain = s->kind == StmtKind::VarDecl || e->kind == ExprKind::Assign;
-                            if (!plain && !st.count(e->target->name)) return violation(e->target->name);   // x += 1 reads x
+                            if (!plain && !st.count(e->target->name)) return violation(e->target->name);
                             st.insert(e->target->name);
                         }
                     } else if (e->kind != ExprKind::Assign && !expr(e, st)) {
@@ -2090,7 +1915,7 @@ private:
                         if (!branch(el.second, entry, ft, out)) return false;
                         if (ft) ends.push_back(out);
                     }
-                    if (!branch(s->else_body, entry, ft, out)) return false;   // no else: falls through with the entry state
+                    if (!branch(s->else_body, entry, ft, out)) return false;
                     if (ft) ends.push_back(out);
                     if (ends.empty()) { reachable = false; break; }
                     Set merged = ends[0];
@@ -2128,13 +1953,11 @@ private:
     }
 };
 
-// Returns a human-readable reason if the function may read a local before assigning it, or "".
 std::string unsafe_read_reason(const Stmt* decl, const std::vector<std::string>& params,
                                const std::unordered_set<std::string>& module_globals,
                                const std::unordered_set<std::string>& numeric_globals,
                                std::unordered_set<std::string>& global_reads);
 
-// Project builds mangle top-level names as "__csy_u<N>_<name>"; show the name the user wrote.
 
 void collect_module_global_names(const std::vector<StmtPtr>& body,
                                  std::unordered_set<std::string>& names) {
@@ -2273,8 +2096,6 @@ std::string unsafe_module_write_reason(const Stmt* decl,
                                        const std::unordered_set<std::string>& globals) {
     std::unordered_set<std::string> writes;
     collect_module_global_writes(decl->body, globals, writes);
-    // A parameter always shadows a module variable of the same name (it is a local),
-    // so assigning one never writes module state.
     for (const auto& p : decl->params) writes.erase(p);
     if (writes.empty()) return {};
     const std::string name = user_visible_name(*std::min_element(writes.begin(), writes.end()));
@@ -2299,35 +2120,8 @@ std::string unsafe_read_reason(const Stmt* decl, const std::vector<std::string>&
     return "may read '" + name + "' before assigning it (native code starts locals at 0, the interpreter at none)";
 }
 
-// ============================================================
-// Move 3: outline eligible top-level loops into synthetic functions
-// ============================================================
-//
-// A `for`/`while` written directly in module code runs in the interpreter, and
-// scripts put their hot loops there. This pass moves such a loop into a
-// synthetic function `__loop_<line>` whose parameters are the module variables
-// the loop needs, and replaces the loop with one call. The function then goes
-// through the normal native pipeline (variants, both backends, --explain-native).
-//
-// The rewrite must not change what the program does, so a loop is outlined only
-// when ALL of these hold (otherwise it stays in module code and the reason is
-// recorded for --explain-native):
-//   * the body is in the native numeric subset (checked with the real scanner,
-//     with no user-function calls, so the loop cannot see or change module state
-//     except through its own variables);
-//   * every module variable it reads before setting, every array it uses, and
-//     every variable it updates that is used afterwards was set before the loop;
-//   * at most ONE variable it updates is used after the loop (it becomes the
-//     return value); updated variables that are provably dead afterwards, and
-//     loop temporaries nobody else mentions, become plain locals;
-//   * no array is both read and written (so the loop can always be re-run from
-//     the start after a native error and reproduce the interpreter's behaviour:
-//     the VM does exactly that for `__loop_` functions).
-// A module variable is "used afterwards" if any function mentions it or any later
-// top-level statement mentions it, except when every later mention is a plain
-// `x = ...;` that overwrites it first or a `for x in thru N` loop that does.
 constexpr const char* kLoopFnPrefix = "__loop_";
-constexpr size_t kMaxLiveOutputs = 3;     // variables used after an outlined loop (one native run each)
+constexpr size_t kMaxLiveOutputs = 3;
 
 void mentions_stmts(const std::vector<StmtPtr>& body, std::unordered_set<std::string>& out);
 
@@ -2395,9 +2189,6 @@ void collect_plain_assigned(const std::vector<StmtPtr>& body, std::unordered_set
     }
 }
 
-// True if `s` mentions `x` anywhere except inside a `for x in thru N` loop whose N does
-// not mention x. Such a loop sets x before its body can read it, so it never observes a
-// value that was left over from earlier code.
 bool mentions_outside_for_var(const StmtPtr& s, const std::string& x) {
     if (!s) return false;
     if (s->kind == StmtKind::For && s->loop_var == x) {
@@ -2425,18 +2216,14 @@ bool mentions_outside_for_var(const StmtPtr& s, const std::string& x) {
     return false;
 }
 
-// What a loop does with each name it mentions, in program order.
 class LoopFacts {
 public:
-    std::vector<std::string> order;                     // first-occurrence order
-    // 'R' read first (needs a value from before the loop), 'A' first set by an
-    // unconditional statement of the loop body, 'C' first set conditionally,
-    // 'S' first set as the variable of a nested `for` (only valid inside it).
+    std::vector<std::string> order;
     std::unordered_map<std::string, char> first;
     std::unordered_set<std::string> assigned, indexed, arr_written, arr_read;
-    std::unordered_set<std::string> read_unsafe;        // read when it may not be set yet
-    std::string bad;                                    // non-empty: cannot be outlined
-    bool exits_early = false;                           // has its own `stop`/`next` (not inside a nested loop)
+    std::unordered_set<std::string> read_unsafe;
+    std::string bad;
+    bool exits_early = false;
 
     void run(const StmtPtr& loop) {
         if (loop->kind == StmtKind::While) {
@@ -2449,8 +2236,8 @@ public:
     }
 
 private:
-    std::unordered_map<std::string, int> scope_;        // nested-for variables currently in scope
-    int nest_ = 0;                                      // depth of loops nested inside the outlined one
+    std::unordered_map<std::string, int> scope_;
+    int nest_ = 0;
 
     void fail(const std::string& why) { if (bad.empty()) bad = why; }
     void read(const std::string& n) {
@@ -2462,7 +2249,6 @@ private:
         assigned.insert(n);
         if (!first.count(n)) { order.push_back(n); first[n] = kind; }
     }
-    // `for v in thru N`: N is read, then v is set once per iteration.
     void for_header(const Stmt& f) {
         const ExprPtr& it = f.iterable;
         if (!it || it->kind != ExprKind::Call || !it->callee || it->callee->kind != ExprKind::Ident ||
@@ -2582,8 +2368,6 @@ private:
     }
 };
 
-// Deep copy of a loop with some identifiers renamed (variables only; function names and
-// builtin names are never in `ren`). The original tree is left untouched.
 using RenameMap = std::unordered_map<std::string, std::string>;
 
 ExprPtr clone_expr(const ExprPtr& e, const RenameMap& ren) {
@@ -2664,8 +2448,8 @@ public:
 private:
     Module& mod_;
     std::vector<StmtPtr>& body_;
-    std::unordered_map<std::string, std::vector<uint32_t>> mention_index_;  // non-function statements
-    std::unordered_map<std::string, std::vector<uint32_t>> def_index_;      // straight-line `x = ...;`
+    std::unordered_map<std::string, std::vector<uint32_t>> mention_index_;
+    std::unordered_map<std::string, std::vector<uint32_t>> def_index_;
     std::unordered_set<std::string> fn_names_, fn_touched_;
 
     void index_module() {
@@ -2691,8 +2475,6 @@ private:
         }
     }
 
-    // Names a function may read or write as MODULE variables: everything it mentions
-    // except its parameters and its own `for` variables (a `for` variable is always a local).
     void add_touched(const Stmt& f) {
         std::unordered_set<std::string> m, for_vars, assigned;
         mentions_stmts(f.body, m);
@@ -2715,7 +2497,6 @@ private:
         auto it = def_index_.find(name);
         return it != def_index_.end() && !it->second.empty() && it->second.front() < k;
     }
-    // True when nothing can observe `name`'s value after the loop at index k.
     bool dead_after(const std::string& name, size_t k) const {
         if (fn_touched_.count(name)) return false;
         auto it = mention_index_.find(name);
@@ -2727,18 +2508,13 @@ private:
                 s.expr->target->kind == ExprKind::Ident && s.expr->target->name == name) {
                 std::unordered_set<std::string> v;
                 mentions_expr(s.expr->value, v);
-                return !v.count(name);       // overwritten before anything can read it
+                return !v.count(name);
             }
-            // Every mention is inside a `for name in thru N` that sets it first: nothing can read
-            // the loop's leftover value (if such a loop runs zero times the value just stays
-            // stale, and the scan continues with the statements after it).
             if (mentions_outside_for_var(body_[idx], name)) return false;
         }
         return true;
     }
 
-    // ---- parameter types, guessed from straight-line module code (a hint only:
-    // a wrong guess just adds an unused native variant, it can never change results) ----
     char guess_type(const std::string& name, size_t k, int depth) const {
         if (depth > 8 || fn_touched_.count(name)) return 0;
         auto dit = def_index_.find(name);
@@ -2773,6 +2549,7 @@ private:
                 if (!e->callee || e->callee->kind != ExprKind::Ident) return 0;
                 auto mit = math_whitelist().find(e->callee->name);
                 if (mit == math_whitelist().end()) return 0;
+                if (mit->second.kind == MathKind::Pred1) return 'I';
                 if (mit->second.kind != MathKind::Promote2) return 'F';
                 if (e->args.size() != 2) return 0;
                 const char a = guess_expr(e->args[0], at, depth), b = guess_expr(e->args[1], at, depth);
@@ -2792,8 +2569,6 @@ private:
         return nm;
     }
 
-    // The literal (int or float) that the loop body's first statement for `name` assigns, if that
-    // statement is a plain `name = <literal>;` directly in the body.
     static ExprPtr first_assigned_literal(const Stmt& loop, const std::string& name) {
         for (const auto& st : loop.body) {
             if (!st || st->kind != StmtKind::VarDecl || !st->expr || st->expr->kind != ExprKind::Assign ||
@@ -2805,7 +2580,6 @@ private:
         return nullptr;
     }
 
-    // `for v in thru K` with an integer literal K >= 1 always executes its body.
     static bool runs_at_least_once(const Stmt& loop) {
         if (loop.kind != StmtKind::For || !loop.iterable || loop.iterable->args.size() != 1) return false;
         const ExprPtr& bound = loop.iterable->args[0];
@@ -2833,8 +2607,8 @@ private:
 
         std::vector<std::string> params, live;
         std::vector<bool> scalar_arg;
-        RenameMap rename;       // loop-local names that are also module variables elsewhere
-        std::unordered_map<std::string, char> seeds;   // live locals that get an unobservable starting value
+        RenameMap rename;
+        std::unordered_map<std::string, char> seeds;
         std::unordered_set<std::string> param_set;
         for (const std::string& name : facts.order) {
             const std::string shown = user_visible_name(name);
@@ -2851,11 +2625,8 @@ private:
             } else if (!outside) {
                 if (needs_init) return keep(loop, "reads '" + shown + "' before it is set");
             } else if (!assigned) {
-                as_param = true;                         // module variable the loop only reads
+                as_param = true;
             } else if (!dead_after(name, k)) {
-                // Updated here and used later: returned. If the loop must run at least once and sets
-                // the variable first thing in its body, the value from before the loop can never
-                // be observed, so it need not exist (or be passed in).
                 as_param = true;
                 if (fk == 'A' && runs_at_least_once(*loop) && !facts.exits_early) {
                     const ExprPtr seed = first_assigned_literal(*loop, name);
@@ -2863,15 +2634,12 @@ private:
                 }
                 live.push_back(name);
             } else {
-                as_param = needs_init;                   // updated here, never observed later
+                as_param = needs_init;
             }
             if (as_param && !defined_before(name, k))
                 return keep(loop, "uses '" + shown + "', which is not set by a plain assignment before the loop");
             if (as_param) { params.push_back(name); param_set.insert(name); scalar_arg.push_back(!is_array); }
             else if (outside) {
-                // Not a parameter, yet the module also has a variable of this name: inside a function
-                // an assignment would write that module variable (Move 0), so the function body
-                // uses a private name for it instead.
                 std::string fresh = name + "__L" + std::to_string(loop->tok.line);
                 while (mention_index_.count(fresh) || fn_names_.count(fresh) || fn_touched_.count(fresh) ||
                        facts.first.count(fresh))
@@ -2879,10 +2647,6 @@ private:
                 rename[name] = fresh;
             }
         }
-        // Each variable used afterwards gets its own function that runs the whole loop and returns that
-        // variable (no change to the native calling convention). The loop is deterministic and its array
-        // writes are idempotent (no array is both read and written), so repeating it is safe; the cost is
-        // one more native run per extra variable, hence the cap.
         if (live.size() > kMaxLiveOutputs) {
             std::string names;
             for (const auto& n : live) names += (names.empty() ? "" : ", ") + user_visible_name(n);
@@ -2905,9 +2669,6 @@ private:
             fn->func_name = unique_name(tok.line);
             fn_list.push_back(fn->func_name);
             fn->params = params;
-            // The loop is certain to run and sets these first thing, so these starting values are never
-            // read; they only let the native checker see the variable is always set before `rt`.
-            // Only the variable this function returns needs one.
             for (const auto& sd : seeds) {
                 if (sd.first != ret_name) continue;
                 auto target = make_expr(ExprKind::Ident, tok);
@@ -2938,7 +2699,6 @@ private:
             }
             fn->body.push_back(ret);
 
-            // The real native scanner is the gate: if it would refuse this function, outlining gains nothing.
             FnInfo info;
             info.decl = fn.get();
             info.param_names = params;
@@ -2992,13 +2752,11 @@ private:
         } else if (live.size() == 1) {
             call_stmts.push_back(make_assign(live[0], make_call(fn_list[0])));
         } else {
-            // Every call must see the values from BEFORE the loop, so the results go into temporaries
-            // first and are only then assigned to the real variables.
             std::vector<std::string> temps;
             for (size_t oi = 0; oi < live.size(); oi++) {
                 std::string tmp = "__lv_" + std::to_string(tok.line) + "_" + std::to_string(oi);
                 while (mention_index_.count(tmp) || fn_names_.count(tmp) || fn_touched_.count(tmp)) tmp += "_";
-                fn_names_.insert(tmp);                        // reserve the name
+                fn_names_.insert(tmp);
                 temps.push_back(tmp);
                 call_stmts.push_back(make_assign(tmp, make_call(fn_list[oi])));
             }
@@ -3039,8 +2797,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         return report;
     }
 
-    // ---- Candidates: top-level functions only (class methods carry a mangled
-    // "$Class$method" name and an implicit `me` parameter). ----
     InstMap fns;
     std::vector<std::string> decl_order;
     for (const auto& s : mod.body) {
@@ -3065,15 +2821,12 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         kept.detail = note.detail;
         report.kept_loops.push_back(std::move(kept));
     }
-    // Module-variable analysis looks at the program as written: an outlined loop is
-    // put back in place of its call, so every proof below is exactly the pre-outlining one.
     std::vector<StmtPtr> analysis_storage;
     const std::vector<StmtPtr>* analysis_body = &mod.body;
     {
         bool any_outlined = false;
         for (const auto& note : mod.loop_notes) if (note.outlined) { any_outlined = true; break; }
         if (any_outlined) {
-            // The first statement that replaced a loop stands for the original loop; the others vanish.
             std::unordered_map<const Stmt*, StmtPtr> original_of;
             std::unordered_set<const Stmt*> dropped;
             for (const auto& note : mod.loop_notes) {
@@ -3089,9 +2842,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
             analysis_body = &analysis_storage;
         }
     }
-    // Real module variables (after outlining) decide what a function may read or write;
-    // the as-written set only feeds the numeric proof, so loop temporaries (which are now
-    // plain locals) are not mistaken for module state.
     std::unordered_set<std::string> module_globals, proof_globals;
     collect_module_global_names(mod.body, module_globals);
     collect_module_global_names(*analysis_body, proof_globals);
@@ -3105,7 +2855,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         return report;
     }
 
-    // ---- Stage 1: eligibility (syntax) ----
     EligibilityScanner scanner(fns);
     for (auto& [name, fn] : fns) {
         if (fn.param_names.size() > kMaxNativeParams) {
@@ -3196,12 +2945,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     InstMap bases;
     for (const auto& name : eligible) { bases.emplace(name, fns.at(name)); bases.at(name).eligible = true; }
 
-    // ---- Stage 2: specialisation + type inference ----
-    // Every eligible function gets a variant for each plausible way the
-    // interpreter may call it (all-int; and for few parameters every int/float
-    // combination), plus whatever variants native callers need - chosen from the
-    // static types of their arguments. A function called with floats where its
-    // body "looks" integer is therefore no longer a dead end.
     InstMap insts;
     std::vector<std::string> creation_order;
     TypeInferer inferer(insts, bases, creation_order);
@@ -3215,7 +2958,7 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         }
         return sig;
     };
-    for (const auto& name : decl_order) {  // natural (all-int) variants first: they get priority under the cap
+    for (const auto& name : decl_order) {
         if (!bases.count(name)) continue;
         const std::string key = inferer.ensure(name, root_signature(bases.at(name), 0));
         if (!key.empty()) root_keys.insert(key);
@@ -3228,16 +2971,13 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         if (scalar_params == 0) continue;
         std::vector<unsigned> masks;
         if (scalar_params <= 3) { for (unsigned m = 1; m < (1u << scalar_params); m++) masks.push_back(m); }
-        else masks.push_back((1u << scalar_params) - 1);  // all-float
+        else masks.push_back((1u << scalar_params) - 1);
         for (unsigned m : masks) {
             if (insts.size() >= kMaxInstances / 2) break;
             const std::string key = inferer.ensure(name, root_signature(base, m));
             if (!key.empty()) root_keys.insert(key);
         }
     }
-    // Outlined loops are called with whatever types the module variables hold; the
-    // outliner guessed them from straight-line module code, so request that variant too
-    // (the all-int and all-float ones above are the only ones made for 4+ scalars).
     for (const auto& note : mod.loop_notes) {
         if (!note.outlined || note.sig_hint.empty()) continue;
         for (const std::string& fname : note.fns) {
@@ -3254,8 +2994,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     inferer.run();
     if (inferer.overflowed()) dbg("native variant limit reached; some call chains stay interpreted");
 
-    // ---- Post-inference validation, with a cascade: an instance is only usable
-    // if everything it calls is usable too. ----
     for (auto& [key, fn] : insts) {
         std::string why;
         if (!always_returns(fn.decl->body)) why = "does not return on every control path";
@@ -3280,7 +3018,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         }
     }
 
-    // ---- What to emit: valid variants reachable from a valid root ----
     std::unordered_set<std::string> reachable;
     std::vector<std::string> stack;
     for (const auto& key : creation_order)
@@ -3299,9 +3036,8 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         FnInfo& fn = insts.at(key);
         fn.id = next_id++;
         emit_order.push_back(key);
-        if (fn.sig.find('M') == std::string::npos) exported.push_back(key);  // 'M' variants are native-to-native only
+        if (fn.sig.find('M') == std::string::npos) exported.push_back(key);
     }
-    // Per-function outcome for the report.
     std::unordered_map<std::string, std::string> compiled_detail;
     std::unordered_map<std::string, std::unordered_set<std::string>> compiled_global_reads;
     for (const auto& key : emit_order) {
@@ -3329,20 +3065,16 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         return report;
     }
 
-    // ---- Stage 3: C codegen ----
     const std::string c_source = CCodeGen(insts).generate(emit_order, exported);
     report.variants = emit_order.size();
     dbg("compiled " + std::to_string(emit_order.size()) + " native variant(s) of " +
         std::to_string(eligible.size()) + " function(s) to C");
 
 
-    // CSy's own x86-64 backend: the same typed program, emitted as machine code. It needs no
-    // C compiler, so it is the fallback when `cc` is missing, and CSY_NATIVE_BACKEND=x64
-    // forces it (used by the differential tests). CSY_NATIVE_BACKEND=c disables it.
     ir.native_x64.clear();
     bool x64_ok = false;
     bool x64_forced = false;
-    std::unordered_set<std::string> own_keys;    // instances that run on the own backend although `cc` exists
+    std::unordered_set<std::string> own_keys;
 #ifdef CSY_HAVE_X64_BACKEND
     x64::Image x64_image;
     std::string x64_why;
@@ -3355,7 +3087,7 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
             if (x64_ok && !x64_forced) own_keys = own_backend_components(insts, emit_order, x64gen.loop_stats());
             if (x64_ok) {
                 ir.native_x64 = x64_serialize(x64_image);
-                if (const char* dump = std::getenv("CSY_X64_DUMP")) {   // for inspecting generated code: objdump -D -b binary -mi386:x86-64
+                if (const char* dump = std::getenv("CSY_X64_DUMP")) {
                     std::ofstream(dump, std::ios::binary) << x64_image.blob;
                 }
             }
@@ -3363,10 +3095,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         }
     }
 #endif
-    // Everything below needs only the generated C. Keep it in the module so an
-    // object file can carry it even if no C compiler exists on this machine.
-    // Functions with a proven profitable vectorisable loop run on the own backend; the C library then
-    // holds only the other components (a library may hold a subset: entries are bound by name and sig).
     const bool all_own = !own_keys.empty() && own_keys.size() == emit_order.size();
     std::string c_source_use = c_source;
     size_t c_variant_count = emit_order.size();
@@ -3396,7 +3124,6 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     ir.native_library.clear();
 
     std::string why;
-    // Binds (run) or just keeps (build) the machine-code image instead of a C-built library.
     auto use_x64 = [&](const std::string& reason) -> bool {
 #ifdef CSY_HAVE_X64_BACKEND
         if (!x64_ok) return false;
@@ -3450,7 +3177,7 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         if (!own_keys.empty()) {
             int extra = 0;
             std::string extra_why;
-            if (x64_load(x64_image, ir, extra, extra_why, /*only_missing=*/true))
+            if (x64_load(x64_image, ir, extra, extra_why,  true))
                 dbg("native fast path: " + std::to_string(extra) + " more variant(s) from the own x86-64 backend");
             else dbg("own x86-64 backend could not supply its functions (" + extra_why + "); they run interpreted");
         }
@@ -3461,15 +3188,119 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     return report;
 }
 
-} // namespace
+}
 
+
+namespace {
+
+class BcCallRewriter {
+public:
+    explicit BcCallRewriter(const std::vector<StmtPtr>& body) {
+        for (const auto& s : body) collect_stmt(s);
+        if (aliases_.empty()) return;
+        for (const auto& s : body) rewrite_stmt(s);
+    }
+    BcCallRewriter(const BcCallRewriter&) = delete;
+    BcCallRewriter& operator=(const BcCallRewriter&) = delete;
+    ~BcCallRewriter() {
+        for (auto it = saved_.rbegin(); it != saved_.rend(); ++it) it->first->callee = it->second;
+    }
+
+private:
+    std::unordered_set<std::string> aliases_;
+    std::unordered_set<std::string> declared_;
+    std::vector<std::pair<Expr*, ExprPtr>> saved_;
+
+    template <class F>
+    static void each_child_stmt(const StmtPtr& s, F&& f) {
+        for (const auto& b : s->body) f(b);
+        for (const auto& b : s->then_body) f(b);
+        for (const auto& el : s->elifs) for (const auto& b : el.second) f(b);
+        for (const auto& b : s->else_body) f(b);
+    }
+
+    template <class F>
+    static void each_child_expr(const ExprPtr& e, F&& f) {
+        f(e->left); f(e->right); f(e->operand); f(e->target); f(e->value);
+        f(e->callee); f(e->object); f(e->index);
+        for (const auto& a : e->args) f(a);
+        for (const auto& a : e->elements) f(a);
+        for (const auto& kv : e->dict_pairs) { f(kv.first); f(kv.second); }
+    }
+
+    void collect_stmt(const StmtPtr& s) {
+        if (!s) return;
+        switch (s->kind) {
+            case StmtKind::Import:
+                if (s->import_module == "basic") aliases_.insert(s->import_alias);
+                else declared_.insert(s->import_alias);
+                break;
+            case StmtKind::Connect:
+                declared_.insert(s->connect_alias);
+                for (const auto& n : s->connect_exports) declared_.insert(n);
+                break;
+            case StmtKind::Using: declared_.insert(s->using_alias); break;
+            case StmtKind::FuncDecl:
+                declared_.insert(s->func_name);
+                for (const auto& p : s->params) declared_.insert(p);
+                break;
+            case StmtKind::For: declared_.insert(s->loop_var); break;
+            case StmtKind::Try: declared_.insert(s->catch_var); break;
+            default: break;
+        }
+        collect_expr(s->expr);
+        collect_expr(s->using_expr);
+        collect_expr(s->cond);
+        collect_expr(s->iterable);
+        collect_expr(s->ret_value);
+        for (const auto& el : s->elifs) collect_expr(el.first);
+        each_child_stmt(s, [this](const StmtPtr& c) { collect_stmt(c); });
+    }
+
+    void collect_expr(const ExprPtr& e) {
+        if (!e) return;
+        if ((e->kind == ExprKind::Assign || e->kind == ExprKind::CompoundAssign) && e->target &&
+            e->target->kind == ExprKind::Ident) {
+            declared_.insert(e->target->name);
+        }
+        each_child_expr(e, [this](const ExprPtr& c) { collect_expr(c); });
+    }
+
+    void rewrite_stmt(const StmtPtr& s) {
+        if (!s) return;
+        rewrite_expr(s->expr);
+        rewrite_expr(s->using_expr);
+        rewrite_expr(s->cond);
+        rewrite_expr(s->iterable);
+        rewrite_expr(s->ret_value);
+        for (const auto& el : s->elifs) rewrite_expr(el.first);
+        each_child_stmt(s, [this](const StmtPtr& c) { rewrite_stmt(c); });
+    }
+
+    void rewrite_expr(const ExprPtr& e) {
+        if (!e) return;
+        if (e->kind == ExprKind::Call && e->callee && e->callee->kind == ExprKind::Member && e->callee->object &&
+            e->callee->object->kind == ExprKind::Ident && aliases_.count(e->callee->object->name) &&
+            math_whitelist().count(e->callee->name) && !declared_.count(e->callee->name)) {
+            ExprPtr bare = make_expr(ExprKind::Ident, e->callee->tok);
+            bare->name = e->callee->name;
+            saved_.emplace_back(e.get(), e->callee);
+            e->callee = bare;
+        }
+        each_child_expr(e, [this](const ExprPtr& c) { rewrite_expr(c); });
+    }
+};
+
+}
 
 void outline_top_level_loops(Module& mod) {
     if (std::getenv("CSY_NO_NATIVE_JIT") || std::getenv("CSY_NO_LOOP_OUTLINE")) return;
+    BcCallRewriter rewrite(mod.body);
     LoopOutliner(mod).run();
 }
 
 NativeReport try_native_compile(const Module& mod, IRModule& ir, NativeMode mode, bool embed_library) {
+    BcCallRewriter rewrite(mod.body);
     return try_native_compile_impl(mod, ir, mode, embed_library);
 }
 
@@ -3479,9 +3310,6 @@ std::string native_host_target() {
     return std::string(u.sysname) + "-" + u.machine + "-" + std::to_string(sizeof(void*) * 8);
 }
 
-// After a C library was bound, binds the functions it does not hold (the ones the build chose to run on
-// the own backend) from the embedded machine-code image. A library that holds every function leaves
-// nothing missing, so objects built before this existed behave exactly as before.
 static int supplement_from_embedded_x64(IRModule& ir) {
 #ifdef CSY_HAVE_X64_BACKEND
     if (ir.native_x64.empty()) return 0;
@@ -3489,7 +3317,7 @@ static int supplement_from_embedded_x64(IRModule& ir) {
     if (!x64_parse(ir.native_x64, image)) return 0;
     int extra = 0;
     std::string why;
-    if (!x64_load(image, ir, extra, why, /*only_missing=*/true)) { dbg("embedded machine code unusable (" + why + ")"); return 0; }
+    if (!x64_load(image, ir, extra, why,  true)) { dbg("embedded machine code unusable (" + why + ")"); return 0; }
     if (extra > 0) dbg("native fast path: " + std::to_string(extra) + " more variant(s) from the embedded machine code");
     return extra;
 #else
@@ -3504,7 +3332,6 @@ size_t attach_embedded_native(IRModule& ir, std::string* note) {
     if (ir.native_library.empty() && ir.native_c_source.empty() && ir.native_x64.empty()) { say("object carries no native code"); return 0; }
     std::string why;
     int loaded = 0;
-    // 1. The embedded library, if it was built for this kind of machine.
     if (!ir.native_library.empty() && ir.native_target == native_host_target() &&
         ir.native_library.size() >= 4 && std::memcmp(ir.native_library.data(), "\x7f" "ELF", 4) == 0) {
         const std::string dir = cache_dir();
@@ -3524,7 +3351,6 @@ size_t attach_embedded_native(IRModule& ir, std::string* note) {
             }
         }
     }
-    // 1b. The embedded machine-code image from CSy's own backend (needs no C compiler).
 #ifdef CSY_HAVE_X64_BACKEND
     if (!ir.native_x64.empty()) {
         x64::Image image;
@@ -3541,7 +3367,6 @@ size_t attach_embedded_native(IRModule& ir, std::string* note) {
         }
     }
 #endif
-    // 2. Rebuild from the embedded C source (cached; needs a C compiler).
     if (!ir.native_c_source.empty()) {
         const std::string so = build_library(ir.native_c_source, 0, why);
         if (!so.empty() && bind_library(so, ir, loaded, why) && loaded > 0) {
@@ -3566,7 +3391,6 @@ std::string summarize_native_report(const NativeReport& r) {
     return out;
 }
 
-// Project builds mangle top-level names as "__csy_u<N>_<name>"; show the name the user wrote.
 static std::string display_name(const std::string& n) {
     if (n.compare(0, 7, "__loop_") == 0) return "top-level loop";
     if (n.compare(0, 7, "__csy_u") == 0) {
@@ -3601,3 +3425,4 @@ std::string format_native_report(const NativeReport& r) {
 }
 
 }
+

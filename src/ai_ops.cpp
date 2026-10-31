@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -16,7 +17,6 @@
 
 namespace csy {
 
-//runtime threading for the ai kernels
 static std::atomic<unsigned> g_run_threads{0};
 static constexpr std::size_t kParallelMinWork = std::size_t(1) << 21;
 
@@ -87,8 +87,9 @@ const std::vector<double>& require_f64(const std::vector<Value>& args,
                                        const char* parameter) {
     if (index >= args.size() || args[index].type != Value::F64Array ||
         !args[index].f64_array_val) {
+        std::string got = index < args.size() ? args[index].type_name() : std::string("nothing");
         throw std::runtime_error(std::string("ai::") + operation + " expects " +
-                                 parameter + " to be a f64_array");
+                                 parameter + " to be a f64_array, got " + got);
     }
     return *args[index].f64_array_val;
 }
@@ -98,9 +99,10 @@ std::size_t require_dim(const std::vector<Value>& args, std::size_t index,
                         bool allow_zero = false) {
     if (index >= args.size() || args[index].type != Value::Int ||
         args[index].int_val < (allow_zero ? 0 : 1)) {
+        std::string got = index < args.size() ? args[index].type_name() : std::string("nothing");
         throw std::runtime_error(std::string("ai::") + operation + " expects " +
                                  name + " to be a " +
-                                 (allow_zero ? "non-negative" : "positive") + " integer");
+                                 (allow_zero ? "non-negative" : "positive") + " integer, got " + got);
     }
     return static_cast<std::size_t>(args[index].int_val);
 }
@@ -165,7 +167,7 @@ inline double activate(double x) {
     if constexpr (A == Activation::Linear) return x;
     if constexpr (A == Activation::Relu) return x > 0.0 ? x : 0.0;
     if constexpr (A == Activation::Tanh) return std::tanh(x);
-    return 1.0 / (1.0 + std::exp(-x)); // sigmoid
+    return 1.0 / (1.0 + std::exp(-x));
 }
 
 template <Activation A>
@@ -173,7 +175,7 @@ inline double activation_derivative(double y) {
     if constexpr (A == Activation::Linear) return 1.0;
     if constexpr (A == Activation::Relu) return y > 0.0 ? 1.0 : 0.0;
     if constexpr (A == Activation::Tanh) return 1.0 - y * y;
-    return y * (1.0 - y); // sigmoid
+    return y * (1.0 - y);
 }
 
 template <Activation A>
@@ -263,7 +265,7 @@ double mlp_train_kernel(const std::vector<double>& input,
                         std::vector<double>& b2,
                         std::size_t batch, std::size_t input_width,
                         std::size_t hidden_width, std::size_t output_width,
-                        std::size_t epochs, double learning_rate) {
+                        std::size_t epochs, double learning_rate, double* first_loss) {
     const std::size_t hidden_size = batch * hidden_width;
     const std::size_t output_size = batch * output_width;
     std::vector<double> hidden(hidden_size), output(output_size);
@@ -329,6 +331,7 @@ double mlp_train_kernel(const std::vector<double>& input,
             final_loss += 0.5 * error * error;
             delta_output_data[i] = error * activation_derivative<A>(output_data[i]);
         }
+        if (epoch == 0 && first_loss) *first_loss = final_loss / static_cast<double>(batch);
         for (std::size_t row = 0; row < batch; ++row) {
             const double* dy_row = delta_output_data + row * output_width;
             double* dh_row = delta_hidden_data + row * hidden_width;
@@ -405,13 +408,13 @@ double dispatch_mlp_train(const std::vector<double>& input,
                           std::vector<double>& b2,
                           std::size_t batch, std::size_t input_width,
                           std::size_t hidden_width, std::size_t output_width,
-                          std::size_t epochs, double learning_rate) {
+                          std::size_t epochs, double learning_rate, double* first_loss) {
     if (output_width == 1) {
         return mlp_train_kernel<A, true>(input, target, w1, b1, w2, b2, batch,
-            input_width, hidden_width, output_width, epochs, learning_rate);
+            input_width, hidden_width, output_width, epochs, learning_rate, first_loss);
     }
     return mlp_train_kernel<A, false>(input, target, w1, b1, w2, b2, batch,
-        input_width, hidden_width, output_width, epochs, learning_rate);
+        input_width, hidden_width, output_width, epochs, learning_rate, first_loss);
 }
 
 }
@@ -419,7 +422,6 @@ double dispatch_mlp_train(const std::vector<double>& input,
 void register_ai_builtins(VM& vm) {
     auto& builtins = vm.builtins_table();
 
-    // Row-major packed matrix multiplication.
     builtins["ai_matmul"] = [](VM&, std::vector<Value>& args) -> Value {
         constexpr const char* op = "matmul";
         if (args.size() != 5) {
@@ -442,7 +444,6 @@ void register_ai_builtins(VM& vm) {
         return result;
     };
 
-    // Fused affine and activation layer.
     builtins["ai_dense"] = [](VM&, std::vector<Value>& args) -> Value {
         constexpr const char* op = "dense";
         if (args.size() != 7 || args[6].type != Value::Str) {
@@ -495,7 +496,6 @@ void register_ai_builtins(VM& vm) {
         return result;
     };
 
-    // gradients reduced across the batch for W and bias.
     builtins["ai_dense_backward"] = [](VM&, std::vector<Value>& args) -> Value {
         constexpr const char* op = "dense_backward";
         if (args.size() != 8 || args[7].type != Value::Str) {
@@ -560,7 +560,6 @@ void register_ai_builtins(VM& vm) {
         return Value::make_vec(std::move(result));
     };
 
-    // In place SGD update to avoid allocating a temporary scaled gradient :3
     builtins["ai_sgd_step"] = [](VM&, std::vector<Value>& args) -> Value {
         constexpr const char* op = "sgd_step";
         if (args.size() != 3 || (args[2].type != Value::Float && args[2].type != Value::Int)) {
@@ -582,10 +581,17 @@ void register_ai_builtins(VM& vm) {
 
     builtins["ai_mlp_train"] = [](VM&, std::vector<Value>& args) -> Value {
         constexpr const char* op = "mlp_train";
-        if (args.size() != 13 || args[12].type != Value::Str ||
-            (args[11].type != Value::Float && args[11].type != Value::Int)) {
+        if ((args.size() != 13 && args.size() != 14) || args[12].type != Value::Str ||
+            (args[11].type != Value::Float && args[11].type != Value::Int) ||
+            (args.size() == 14 && args[13].type != Value::Str)) {
             throw std::runtime_error(
-                "ai::mlp_train expects (input, target, W1, b1, W2, b2, batch, input_width, hidden_width, output_width, epochs, learning_rate, activation)");
+                "ai::mlp_train expects (input, target, W1, b1, W2, b2, batch, input_width, hidden_width, output_width, epochs, learning_rate, activation[, reduction])");
+        }
+        bool mean_reduction = false;
+        if (args.size() == 14) {
+            const std::string& reduction = *args[13].str_val;
+            if (reduction == "mean") mean_reduction = true;
+            else if (reduction != "sum") throw std::runtime_error("ai::mlp_train reduction must be 'sum' or 'mean'");
         }
         const auto& input = require_f64(args, 0, op, "input");
         const auto& target = require_f64(args, 1, op, "target");
@@ -617,8 +623,10 @@ void register_ai_builtins(VM& vm) {
         const std::size_t hidden_width = require_dim(args, 8, op, "hidden_width");
         const std::size_t output_width = require_dim(args, 9, op, "output_width");
         const std::size_t epochs = require_dim(args, 10, op, "epochs");
-        const double learning_rate = args[11].type == Value::Int
+        double learning_rate = args[11].type == Value::Int
             ? static_cast<double>(args[11].int_val) : args[11].float_val;
+        const double requested_learning_rate = learning_rate;
+        if (mean_reduction) learning_rate /= static_cast<double>(batch);
         const std::string& activation = *args[12].str_val;
         Activation kind;
         if (activation == "linear") kind = Activation::Linear;
@@ -642,23 +650,30 @@ void register_ai_builtins(VM& vm) {
         require_size(b2, output_width, op, "b2");
 
         double loss = 0.0;
+        double first_loss = 0.0;
         switch (kind) {
             case Activation::Linear:
                 loss = dispatch_mlp_train<Activation::Linear>(input, target, w1, b1, w2, b2,
-                    batch, input_width, hidden_width, output_width, epochs, learning_rate);
+                    batch, input_width, hidden_width, output_width, epochs, learning_rate, &first_loss);
                 break;
             case Activation::Relu:
                 loss = dispatch_mlp_train<Activation::Relu>(input, target, w1, b1, w2, b2,
-                    batch, input_width, hidden_width, output_width, epochs, learning_rate);
+                    batch, input_width, hidden_width, output_width, epochs, learning_rate, &first_loss);
                 break;
             case Activation::Sigmoid:
                 loss = dispatch_mlp_train<Activation::Sigmoid>(input, target, w1, b1, w2, b2,
-                    batch, input_width, hidden_width, output_width, epochs, learning_rate);
+                    batch, input_width, hidden_width, output_width, epochs, learning_rate, &first_loss);
                 break;
             case Activation::Tanh:
                 loss = dispatch_mlp_train<Activation::Tanh>(input, target, w1, b1, w2, b2,
-                    batch, input_width, hidden_width, output_width, epochs, learning_rate);
+                    batch, input_width, hidden_width, output_width, epochs, learning_rate, &first_loss);
                 break;
+        }
+        if (epochs >= 2 && (!std::isfinite(loss) || loss > first_loss)) {
+            std::cerr << "[csy] warning: ai::mlp_train finished with a loss of " << loss << ", which is not lower than the starting loss of "
+                      << first_loss << ". Gradients are summed over the " << batch << " rows of the batch, so a learning rate of "
+                      << requested_learning_rate << " may be too large; try " << requested_learning_rate / static_cast<double>(batch)
+                      << " or pass \"mean\" as the last argument.\n";
         }
         return Value::make_float(loss);
     };
@@ -739,3 +754,4 @@ void register_ai_builtins(VM& vm) {
 }
 
 }
+

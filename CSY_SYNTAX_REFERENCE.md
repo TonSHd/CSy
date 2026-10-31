@@ -4,14 +4,14 @@ This document provides a comprehensive reference for all CSy language syntax, de
 
 ## Overview
 
-CSy is an AI-focused compiled language designed for AI development with concise, readable syntax and direct control over model architecture. It compiles to bytecode and can optionally generate native code via LLVM or its own x86-64 backend.
+CSy is an AI-focused compiled language designed for AI development with concise, readable syntax and direct control over model architecture. It compiles to bytecode and can optionally generate native code with its own x86-64 backend.
 
 ## File Extensions
 
 - `.csy` - CSy source files
 - `.csp` - CSy project files (TOML-like configuration)
 - `.cso` - Compiled CSy objects (bytecode)
-- `.csyf64` - Packed Float64 array checkpoints
+- `.csyf64` - Binary Float64 array checkpoints (checksummed, see Packed Float64 Arrays)
 
 ## Comments
 
@@ -36,6 +36,32 @@ CSy is an AI-focused compiled language designed for AI development with concise,
 using bc::out as o;
 # Now use o> instead of bc::out>
 ```
+
+A `using` alias can name any builtin, or any member of an imported module or `#connect` namespace:
+
+```csy
+#inc basic as bc;
+#inc ai as ai;
+#connect "scripts/mathx.csy";
+
+using bc::len as ln;
+using bc::sqrt as sq;
+using ai::dense as dense;
+using mathx::add as plus;
+
+bc::out>ln([1, 2, 3]);     # 3
+bc::out>sq(16.0);          # 4
+bc::out>bc::map(sq, [4.0, 9.0]);   # an alias can also be passed as a value
+```
+
+- The target is checked on the `using` line, so `using bc::lenn as x;` is a compile error with a
+  suggestion.
+- A parameter, loop variable or local variable with the same name hides the alias inside that
+  function.
+- An alias is optional. The common builtins also work bare: `len(x)`, `sqrt(x)`, `range(n)` and
+  `isnan(x)` need no `bc::` and no `using`.
+- Aliases are resolved by the compiler, so they cost nothing at run time, and native code treats
+  `sq(x)` exactly like `bc::sqrt(x)`.
 
 ## Variables
 
@@ -343,7 +369,32 @@ bc::push(items, 100);
 for x in items:
     bc::out>x;
 ::ext
+
+# Slice: a new vector holding items[start] up to but not including items[end]
+bc::slice(items, 1, 3);    # [2, 3]
+bc::slice(items, 2);       # from index 2 to the end
+bc::slice(items, -2);      # the last two elements
+bc::slice(items, 1, -1);   # everything except the first and last
+
+# Shuffle: a new vector in random order (seeded by bc::seed); the original is untouched
+mixed = bc::shuffle(items);
+
+# Copy: an independent copy (see the note below)
+backup = bc::copy(items);
+
+# Range: the integers 0 to n - 1 as a vector (takes exactly one number)
+order = bc::range(5);              # [0, 1, 2, 3, 4]
+picked = bc::shuffle(bc::range(5)); # the same numbers in random order
 ```
+
+`bc::slice` and `bc::shuffle` also work on an f64_array and return an f64_array. A negative index
+counts from the end. A range that falls outside the collection is an error, not a clamp. Strings
+are not sliced with `bc::slice`; use `bc::substr`.
+
+Assigning a vector, dict or f64_array does not copy it. After `b = a`, both names refer to the same
+data, so `b[0] = 5` also changes `a`. `bc::copy(x)` builds an independent copy, and it copies nested
+vectors and dicts too. `bc::slice` copies only the top level, so the rows of a nested vector are
+still shared with the original.
 
 ## String Operations
 
@@ -413,9 +464,15 @@ bc::floor(3.7);     # Floor
 bc::ceil(3.2);      # Ceiling
 bc::round(3.5);     # Round
 bc::abs(-42);       # Absolute value
-bc::max(10, 20);    # Maximum
+bc::max(10, 20, 15);  # Maximum of any number of arguments (a NaN is ignored unless all are NaN)
 bc::min(10, 20);    # Minimum
-bc::clamp(15, 0, 10);  # Clamp to range
+bc::max([4, 9, 2]); # Largest element of a vector or f64_array (same for bc::min)
+bc::exp(1);         # e raised to a power
+bc::isnan(x);       # true if x is NaN (a null loaded from Parquet or CSV is NaN)
+bc::isinf(x);       # true if x is +inf or -inf
+bc::std(values);    # Standard deviation of a vector or f64_array (divides by n)
+bc::var(values);    # Variance (divides by n); bc::var(values, 1) divides by n - 1
+bc::clamp(15, 0, 10);  # Clamp to range (NaN if any argument is NaN)
 bc::PI();           # Pi constant (a call; bare bc::PI is a function value, not the number)
 bc::E();            # Euler's number (same rule)
 ```
@@ -486,6 +543,9 @@ bc::exit(1);   # Exit with error code
 arguments = bc::args();  # Get command-line arguments as vector
 ```
 
+Program arguments go after a `--`: `csyc script.csy -- first second` makes `bc::args()` return
+`["first", "second"]`. Without the `--`, `csyc` treats the extra words as input files.
+
 ## Tensor Operations
 
 ```csy
@@ -548,9 +608,67 @@ bc::out>weights[-1];  # Last element
 - Used for AI model parameters
 - Can be compiled to native code for performance
 
+### Checkpoint files (.csyf64)
+
+`bc::save_f64(path, array)` writes a binary file and returns `true`; `bc::load_f64(path)` reads it
+back as an `f64_array`. The layout is an 8-byte magic header, the value count (8 bytes,
+little-endian), the raw little-endian doubles, and an 8-byte xxHash64 checksum. An array of 1000
+values takes 8,024 bytes.
+
+- Saves are atomic. The data goes to a temporary file that is renamed into place, so a crash or a
+  kill in the middle of a save leaves the previous checkpoint intact and no partial file behind.
+- `bc::load_f64` checks the header, the file size and the checksum before it returns, and the size
+  is checked before any memory is allocated. A truncated, extended or corrupted file raises an
+  error instead of loading wrong numbers.
+- NaN, infinity, negative zero and subnormal values round trip bit for bit.
+- The limit is 134,217,728 values (see Limits and Caps).
+- Old text checkpoints (first line `CSYF64 1`) still load, up to 16 million values or 128 MiB.
+  Saving the loaded array again converts it to the binary format. Text checkpoints cannot hold NaN
+  or infinity.
+- The file stores values only, not a shape or a scaler. Keep the layer sizes and any
+  normalization statistics next to it, for example in a JSON file (see Training a Model from a
+  Parquet File).
+
+On a 4 million value array the old text format took about 1.8 s to save and 1.0 s to load; the
+binary format takes about 0.04 s and 0.03 s.
+
+### Which builtins accept an f64_array
+
+Elementwise math returns a new `f64_array`, so the result can go straight into `ai::` functions.
+
+| Builtin | With an f64_array | Result |
+|---|---|---|
+| `bc::len`, `bc::sum`, `bc::mean`, `bc::has(a, x)`, `bc::contains(a, x)` | works | int, float, float, bool, bool |
+| `bc::max(a)`, `bc::min(a)` | works | float |
+| `bc::std(a)`, `bc::var(a)` | works (divides by n; `bc::var(a, 1)` divides by n - 1) | float |
+| `bc::slice(a, start, end)`, `bc::copy(a)`, `bc::shuffle(a)` | works | new f64_array |
+| `bc::sqrt`, `exp`, `log`, `log2`, `log10`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `abs`, `floor`, `ceil`, `round`, `sign`, `sigmoid`, `relu`, `tanh` and the `_deriv` functions | applied to every element | new f64_array |
+| `bc::softmax(a)`, `bc::softmax(a, cols)` | works | new f64_array |
+| `bc::argmax(a)`, `bc::argmax(a, cols)` | works | int, or a vector of ints with `cols` |
+| `bc::sort(a)`, `bc::reverse(a)` | works (NaN sorts last) | new f64_array |
+| `bc::shape(a)` | works | `[length]` |
+| `bc::dot(a, b)` | works with f64_arrays or vectors of equal length | float |
+| `bc::join(a, sep)` | works | string |
+| `a + b`, `a * 2.0`, `a - b`, `a / b` | elementwise | new f64_array |
+| `bc::push(a, x)` | error: an f64_array has a fixed size | |
+| `bc::map`, `bc::filter`, `bc::reduce`, `bc::transpose`, `bc::sum_cols` | error: they need a vector or a nested vector | |
+
+Passing something that is not numeric (a string, a dict, `none`) to a math function is an error;
+it is never treated as 0. Convert a vector with `bc::to_f64(vector)`.
+
+A network output is one flat buffer of `rows * cols` values. Pass `cols` to work row by row:
+
+```csy
+probs = bc::softmax(logits, 3);   # f64_array; every group of 3 values sums to 1
+picks = bc::argmax(probs, 3);     # vector with one class index per row
+```
+
+Without `cols`, `bc::softmax` treats the whole array as a single row. `cols` must be a positive
+integer that divides the length of the array.
+
 ## Datasets and JSON
 
-CSy can read and write AI datasets as JSON, JSONL, Parquet, `.bin` tensors and plain
+CSy can read and write AI datasets as JSON, JSONL, Parquet, CSV, `.bin` tensors and plain
 text files. All of these are in `bc`. Every save writes to a temporary file first and
 renames it when finished, so a failed save never leaves a half written dataset. Errors
 are ordinary catchable errors with the file name and, for text formats, the line and
@@ -614,11 +732,54 @@ sorted name order). A column is an `f64_array`, or a vector of one kind of value
 numbers, bools or strings, with `none` for missing values. Ints mixed with floats
 become doubles. Files are written uncompressed, one row group per 1048576 rows.
 
-What it reads: flat tables, UNCOMPRESSED, SNAPPY and GZIP, PLAIN, dictionary,
+What it reads: flat tables, UNCOMPRESSED, SNAPPY, GZIP and ZSTD, PLAIN, dictionary,
 RLE and BYTE_STREAM_SPLIT encodings, data page versions 1 and 2. Dates, timestamps and
 decimals come back as their raw numbers. Not supported, with a clear error: nested or
-repeated columns (unless you select only the flat ones), ZSTD, LZ4 and Brotli,
+repeated columns (unless you select only the flat ones), LZ4 and Brotli,
 DELTA encodings, INT96 and fixed length byte columns, and encrypted files.
+
+A file that uses an unsupported codec or encoding can be rewritten once with a supported one, for
+example in Python: `pyarrow.parquet.write_table(table, "out.parquet", compression="snappy")`
+(pandas: `df.to_parquet("out.parquet", compression="snappy")`).
+
+ZSTD is decoded by CSy's own decoder, with no external library. It reads every compression
+level, checks the content checksum when the file has one, and rejects a corrupt page with an
+error instead of returning wrong values. A page that needs a ZSTD dictionary is rejected, because
+Parquet writers do not use them. `save_parquet` still writes uncompressed files. Reading ZSTD
+adds little: on a 2 million row file the decode cost was about 0.4 s, and the rest of the load time
+is the same as for an uncompressed file.
+
+### CSV
+
+```csy
+t = bc::load_csv("data.csv");
+t["names"];
+t["rows"];
+x = t["columns"]["height"];
+bc::save_csv("out.csv", t);
+bc::save_csv("out2.csv", {"a": [1, 2, 3], "b": ["x", "y", "z"]});
+```
+
+`load_csv` returns the same table shape as `load_parquet`: a dict with `names`, `rows` and
+`columns`. The first line is the header. Each column gets one type, decided from every row of
+the file: all bools (`true` or `false`, any case) give a vector of bools, all whole numbers that fit
+in 64 bits give a vector of ints, any other column of numbers (including `nan` and `inf`) gives an
+`f64_array` that can go straight into `ai::` functions, and anything else gives a vector of strings.
+An empty cell is `none` in a bool or int vector, `NaN` in an `f64_array`, and an empty string in a
+string vector.
+
+Options go in a dict as the second argument: `delimiter` (one character, for example `";"`;
+`.tsv` files default to a tab), `header` (`false` if the file has no header line, the columns are then
+called `col0`, `col1`, ...), `columns` (a vector of names to load), `types` (a dict from column name
+to `"int"`, `"f64"`, `"bool"` or `"str"`, to override the guess) and `max_rows`.
+
+Quoted fields, doubled quotes, line breaks inside quotes, `\r\n` line endings and a leading byte
+order mark are all handled. A row with the wrong number of fields is an error that names its
+line number, and so is a cell that does not fit its column's type.
+
+`save_csv` takes a table, or a plain dict of columns (written in sorted name order). `NaN` and `none`
+are written as an empty cell. A string such as `"007"` is written as it is and will read back as the
+number 7 unless you pass `types`.
 
 ### .bin tensors
 
@@ -660,7 +821,7 @@ bc::save_dataset("train.parquet", table);
 ```
 
 `load_text` returns one string per line. `load_dataset` and `save_dataset` pick the
-format from the extension: `.parquet` or `.pq`, `.jsonl` or `.ndjson`, `.json`, `.bin`,
+format from the extension: `.parquet` or `.pq`, `.csv` or `.tsv`, `.jsonl` or `.ndjson`, `.json`, `.bin`,
 and anything else is a plain text file. Extra arguments are passed on to the matching
 function.
 
@@ -695,6 +856,9 @@ the beginning (for the next epoch), `dataset_info(handle)` describes the dataset
 What a batch looks like depends on the format:
 
 - `.parquet`: a table, the same shape as `load_parquet` returns. Option `columns`.
+- `.csv` and `.tsv`: a table with up to that many rows. Options `delimiter`, `header`, `columns`, `types`.
+  The column types are decided from the first 10000 rows and then kept; a later cell that does not fit
+  is an error that names the row and column, and `types` lets you choose the type yourself.
 - `.jsonl`: a vector of rows. `.txt` and other files: a vector of lines.
 - `.bin`: a dict with `dtype`, `shape` (first number is the rows in this batch) and a flat `data` f64_array.
   For a file without a header pass `{"raw": "f32", "row_len": 784}`, and optionally `"offset"` to skip a header.
@@ -717,6 +881,7 @@ writer that is never closed saves nothing and prints a warning when the program 
   fit is rejected whole, and you can carry on writing. Batches are collected into row groups
   of up to 1048576 rows.
 - `.bin`: the first batch fixes the dtype (option `dtype`) and every dimension after the first.
+- `.csv` and `.tsv`: the first batch fixes the header, later batches must have the same columns (option `delimiter`).
 - `.jsonl` and text files: append rows or lines.
 - A `.json` file is a single value, so it cannot be streamed.
 
@@ -749,6 +914,83 @@ gradients = ai::dense_backward(
     X, W, output, error, batch, input_width, output_width, "sigmoid");
 ```
 
+`error` is the gradient of the loss with respect to this layer's output. The function applies the
+derivative of the activation itself, using `output`, so pass `"linear"` for a layer with no
+activation. `dInput` (the third element) is the error to hand to the layer below, which makes a
+multi-layer network a chain of calls. Gradients are summed over the batch, so divide by `batch`
+when you build `error`.
+
+Training a three-class classifier with softmax and cross-entropy needs this manual loop, because
+`ai::mlp_train` only does mean squared error with one activation for both layers. For softmax with
+cross-entropy the error at the logits is `(probability - one_hot_target) / rows`:
+
+```csy
+#inc basic as bc;
+#inc ai as ai;
+using bc::out as o;
+bc::seed(7);
+
+rows = 300;
+width = 2;
+classes = 3;
+hidden = 8;
+
+X = bc::f64_array(rows * width);
+labels = [];
+for i in thru rows:
+    a = bc::random() * 2.0 - 1.0;
+    X[i * width] = a;
+    X[i * width + 1] = bc::random() * 2.0 - 1.0;
+    c = 1;
+    if a < -0.33:
+        c = 0;
+    orf a > 0.33:
+        c = 2;
+    ::ext
+    bc::push(labels, c);
+::ext
+
+W1 = bc::to_f64(bc::rand_mat(width, hidden, -0.5, 0.5));
+b1 = bc::f64_array(hidden);
+W2 = bc::to_f64(bc::rand_mat(hidden, classes, -0.5, 0.5));
+b2 = bc::f64_array(classes);
+dZ = bc::f64_array(rows * classes);
+
+for step in thru 301:
+    H = ai::dense(X, W1, b1, rows, width, hidden, "relu");
+    Z = ai::dense(H, W2, b2, rows, hidden, classes, "linear");
+    P = bc::softmax(Z, classes);
+
+    for i in thru rows:
+        for c in thru classes:
+            target = 0.0;
+            if c == labels[i]:
+                target = 1.0;
+            ::ext
+            dZ[i * classes + c] = (P[i * classes + c] - target) / rows;
+        ::ext
+    ::ext
+
+    g2 = ai::dense_backward(H, W2, Z, dZ, rows, hidden, classes, "linear");
+    g1 = ai::dense_backward(X, W1, H, g2[2], rows, width, hidden, "relu");
+    ai::sgd_step(W2, g2[0], 0.5);
+    ai::sgd_step(b2, g2[1], 0.5);
+    ai::sgd_step(W1, g1[0], 0.5);
+    ai::sgd_step(b1, g1[1], 0.5);
+
+    if step % 100 == 0:
+        picks = bc::argmax(P, classes);
+        right = 0;
+        for i in thru rows:
+            if picks[i] == labels[i]:
+                right += 1;
+            ::ext
+        ::ext
+        o>"step " + bc::str(step) + "  accuracy " + bc::str(right * 1.0 / rows);
+    ::ext
+::ext
+```
+
 ### SGD Step
 ```csy
 # Update parameters in place
@@ -762,15 +1004,342 @@ ai::sgd_step(b, db, learning_rate);
 loss = ai::mlp_train(X, Y, W1, b1, W2, b2,
                      batch, input_width, hidden_width, output_width,
                      epochs, learning_rate, "sigmoid");
+
+# Same, with the gradient averaged over the batch
+loss = ai::mlp_train(X, Y, W1, b1, W2, b2,
+                     batch, input_width, hidden_width, output_width,
+                     epochs, learning_rate, "sigmoid", "mean");
 ```
+
+By default the gradient is the sum over all `batch` rows, not the average, so the step size grows
+with the number of rows. A learning rate that works for 4 rows can overshoot and saturate the
+network for 2000 rows. Divide the learning rate by `batch`, or pass `"mean"` as the optional last
+argument, which does exactly that. `ai::dense_backward` and `ai::sgd_step` also work with summed
+gradients, so scale the learning rate yourself when you use them.
+
+Both layers use the same activation and the loss is always mean squared error, so use it for
+regression or for a sigmoid classifier. For softmax with cross-entropy, or a ReLU hidden layer with a
+linear output, write the loop with `ai::dense` and `ai::dense_backward` (see Backward Pass).
+
+The returned loss is `0.5 * (sum of squared errors) / batch`, measured with the weights from the start
+of the last epoch. If the final loss is not lower than the loss of the first epoch (or is not a number),
+`mlp_train` prints a warning on stderr that suggests a smaller learning rate.
 
 ### GPU Training
 ```csy
-# Same as mlp_train but uses CUDA/cuBLAS
+# Same as mlp_train (summed gradients, no reduction argument) but uses CUDA/cuBLAS
 loss = ai::mlp_train_gpu(X, Y, W1, b1, W2, b2,
                          batch, input_width, hidden_width, output_width,
                          epochs, learning_rate, "sigmoid");
 ```
+
+## Training a Model from a Parquet File
+
+This is a complete, runnable example: a two-layer network that classifies rows of a Parquet file
+with 30 numeric feature columns and a `label` column of 0 and 1. It splits the rows, standardizes
+the features with statistics from the training rows only, trains, reports accuracy on the held-out
+rows, and saves everything a separate program needs to make predictions.
+
+The file is read with `bc::load_parquet`, which returns a table with `"names"`, `"rows"` and
+`"columns"`. A numeric column arrives as an `f64_array`. The matrix `ai::` functions expect is one
+flat row-major `f64_array`, so the feature columns are copied into it. Every helper that loops over
+arrays is a function, which lets it run natively. Run `csyc train.csy --explain-native` to check.
+
+The split here takes the last 20 percent of the rows as the test set, so it assumes the rows are
+already in random order. If they are not, build `order = bc::shuffle(bc::range(rows))` and read
+each column through it.
+
+### Training program (train.csy)
+
+```csy
+#inc basic as bc;
+#inc ai as ai;
+using bc::out as o;
+
+func fill_rows(X, col, j, start, count, width):
+    for i in thru count:
+        X[i * width + j] = col[start + i];
+    ::ext
+    rt 0;
+::ext
+
+func fit_scaler(X, rows, width, mu, sd):
+    for j in thru width:
+        s = 0.0;
+        for i in thru rows:
+            s += X[i * width + j];
+        ::ext
+        m = s / rows;
+        v = 0.0;
+        for i in thru rows:
+            d = X[i * width + j] - m;
+            v += d * d;
+        ::ext
+        dev = sqrt(v / rows);
+        if dev == 0.0:
+            dev = 1.0;
+        ::ext
+        mu[j] = m;
+        sd[j] = dev;
+    ::ext
+    rt 0;
+::ext
+
+func apply_scaler(X, rows, width, mu, sd):
+    for i in thru rows:
+        for j in thru width:
+            X[i * width + j] = (X[i * width + j] - mu[j]) / sd[j];
+        ::ext
+    ::ext
+    rt 0;
+::ext
+
+func count_correct(P, Y, rows):
+    right = 0;
+    for i in thru rows:
+        if P[i] > 0.5:
+            if Y[i] == 1.0:
+                right += 1;
+            ::ext
+        else:
+            if Y[i] == 0.0:
+                right += 1;
+            ::ext
+        ::ext
+    ::ext
+    rt right;
+::ext
+
+bc::seed(42);
+t = bc::load_parquet("data.parquet");
+rows = t["rows"];
+width = bc::len(t["names"]) - 1;
+ntr = rows * 8 / 10;
+nte = rows - ntr;
+
+Xtr = bc::f64_array(ntr * width);
+Xte = bc::f64_array(nte * width);
+Ytr = bc::f64_array(ntr);
+Yte = bc::f64_array(nte);
+for j in thru width:
+    col = t["columns"][t["names"][j]];
+    fill_rows(Xtr, col, j, 0, ntr, width);
+    fill_rows(Xte, col, j, ntr, nte, width);
+::ext
+label = t["columns"]["label"];
+fill_rows(Ytr, label, 0, 0, ntr, 1);
+fill_rows(Yte, label, 0, ntr, nte, 1);
+
+mu = bc::f64_array(width);
+sd = bc::f64_array(width);
+fit_scaler(Xtr, ntr, width, mu, sd);
+apply_scaler(Xtr, ntr, width, mu, sd);
+apply_scaler(Xte, nte, width, mu, sd);
+
+hidden = 16;
+W1 = bc::to_f64(bc::rand_mat(width, hidden, -0.3, 0.3));
+b1 = bc::f64_array(hidden);
+W2 = bc::to_f64(bc::rand_mat(hidden, 1, -0.3, 0.3));
+b2 = bc::f64_array(1);
+
+for round in thru 5:
+    loss = ai::mlp_train(Xtr, Ytr, W1, b1, W2, b2, ntr, width, hidden, 1, 100, 0.5, "sigmoid", "mean");
+    H = ai::dense(Xte, W1, b1, nte, width, hidden, "sigmoid");
+    P = ai::dense(H, W2, b2, nte, hidden, 1, "sigmoid");
+    o>"epochs " + bc::str((round + 1) * 100) + "  loss " + bc::str(loss)
+       + "  test accuracy " + bc::str(count_correct(P, Yte, nte) * 1.0 / nte);
+::ext
+
+bc::save_f64("model_w1.csyf64", W1);
+bc::save_f64("model_b1.csyf64", b1);
+bc::save_f64("model_w2.csyf64", W2);
+bc::save_f64("model_b2.csyf64", b2);
+bc::save_f64("model_mu.csyf64", mu);
+bc::save_f64("model_sd.csyf64", sd);
+bc::save_json("model.json", {"width": width, "hidden": hidden});
+```
+
+Output looks like this (the exact numbers depend on your data and seed):
+
+```
+epochs 100  loss 0.0256507  test accuracy 0.973684
+epochs 200  loss 0.0163851  test accuracy 0.982456
+```
+
+### Inference program (predict.csy)
+
+A separate program loads the six checkpoint files and the JSON, applies the saved scaler, and
+runs the forward pass.
+
+```csy
+#inc basic as bc;
+#inc ai as ai;
+using bc::out as o;
+
+func fill_rows(X, col, j, start, count, width):
+    for i in thru count:
+        X[i * width + j] = col[start + i];
+    ::ext
+    rt 0;
+::ext
+
+func apply_scaler(X, rows, width, mu, sd):
+    for i in thru rows:
+        for j in thru width:
+            X[i * width + j] = (X[i * width + j] - mu[j]) / sd[j];
+        ::ext
+    ::ext
+    rt 0;
+::ext
+
+cfg = bc::load_json("model.json");
+width = cfg["width"];
+hidden = cfg["hidden"];
+W1 = bc::load_f64("model_w1.csyf64");
+b1 = bc::load_f64("model_b1.csyf64");
+W2 = bc::load_f64("model_w2.csyf64");
+b2 = bc::load_f64("model_b2.csyf64");
+mu = bc::load_f64("model_mu.csyf64");
+sd = bc::load_f64("model_sd.csyf64");
+
+t = bc::load_parquet("data.parquet");
+rows = t["rows"];
+X = bc::f64_array(rows * width);
+for j in thru width:
+    fill_rows(X, t["columns"][t["names"][j]], j, 0, rows, width);
+::ext
+apply_scaler(X, rows, width, mu, sd);
+
+H = ai::dense(X, W1, b1, rows, width, hidden, "sigmoid");
+P = ai::dense(H, W2, b2, rows, hidden, 1, "sigmoid");
+o>"first three probabilities:";
+for i in thru 3:
+    o>P[i];
+::ext
+```
+
+Two things are easy to forget. The scaler must be saved with the weights, because a network trained
+on standardized features gives meaningless output for raw ones. And `save_f64` stores only values,
+so keep the layer sizes in the JSON file.
+
+### Mini-batches
+
+`ai::mlp_train` runs full-batch gradient descent. For mini-batches, call it once per slice with
+`epochs` set to 1; the weights are updated in place. `bc::slice` cuts a batch out of the flat
+feature buffer, and shuffling the order of the batches each epoch is one call. Replace the
+`for round` loop of the training program with:
+
+```csy
+batch = 64;
+nbatches = (ntr + batch - 1) / batch;
+for epoch in thru 100:
+    for k in bc::shuffle(bc::range(nbatches)):
+        first = k * batch;
+        last = bc::min(first + batch, ntr);
+        Xb = bc::slice(Xtr, first * width, last * width);
+        Yb = bc::slice(Ytr, first, last);
+        ai::mlp_train(Xb, Yb, W1, b1, W2, b2, last - first, width, hidden, 1, 1, 0.5, "sigmoid", "mean");
+    ::ext
+    if (epoch + 1) % 25 == 0:
+        H = ai::dense(Xte, W1, b1, nte, width, hidden, "sigmoid");
+        P = ai::dense(H, W2, b2, nte, hidden, 1, "sigmoid");
+        o>"epoch " + bc::str(epoch + 1) + "  test accuracy " + bc::str(count_correct(P, Yte, nte) * 1.0 / nte);
+    ::ext
+::ext
+```
+
+The last batch can be smaller than the others, which is why `last - first` is passed as the number of
+rows. This shuffles the order of whole batches; if the rows are sorted by class, shuffle them once
+before splitting.
+
+### Recipes for things that are not builtins
+
+CSy has no builtin for `concat`, `randn`, `one_hot`, `cross_entropy`, `argsort`, `unique`, `cumsum`,
+`adam` or `dropout`. These are small functions you can write yourself. Loops over arrays and numbers run natively when they sit inside a function.
+
+Shuffled row indices: `bc::shuffle(bc::range(rows))` returns the numbers 0 to `rows - 1` in random
+order, and `bc::seed` makes it repeatable.
+
+One-hot encoding of integer class labels into a flat `rows * classes` buffer:
+
+```csy
+func one_hot(labels, rows, classes):
+    Y = bc::f64_array(rows * classes);
+    for i in thru rows:
+        Y[i * classes + labels[i]] = 1.0;
+    ::ext
+    rt Y;
+::ext
+```
+
+Counting missing values (nulls load as NaN). A NaN that reaches `ai::dense` or `bc::mean` turns every
+result into NaN, so fill or drop missing values before training:
+
+```csy
+func count_nan(X, n):
+    c = 0;
+    for i in thru n:
+        if isnan(X[i]):
+            c += 1;
+        ::ext
+    ::ext
+    rt c;
+::ext
+```
+
+Filling missing values in one column of a flat feature matrix with that column's mean:
+
+```csy
+func fill_nan_mean(X, rows, width):
+    for j in thru width:
+        s = 0.0;
+        n = 0;
+        for i in thru rows:
+            if isnan(X[i * width + j]):
+                skip;
+            ::ext
+            s += X[i * width + j];
+            n += 1;
+        ::ext
+        m = 0.0;
+        if n > 0:
+            m = s / n;
+        ::ext
+        for i in thru rows:
+            if isnan(X[i * width + j]):
+                X[i * width + j] = m;
+            ::ext
+        ::ext
+    ::ext
+    rt 0;
+::ext
+```
+
+Adam, with the first and second moment buffers `m` and `v` (f64_arrays the same size as the
+parameter) and a step counter that starts at 1. Pass the length `n` in; `bc::len(W)` inside the
+function would keep it interpreted:
+
+```csy
+func adam(W, g, m, v, lr, step, n):
+    beta1 = 0.9;
+    beta2 = 0.999;
+    c1 = 1.0 - pow(beta1, step);
+    c2 = 1.0 - pow(beta2, step);
+    for k in thru n:
+        m[k] = beta1 * m[k] + (1.0 - beta1) * g[k];
+        v[k] = beta2 * v[k] + (1.0 - beta2) * g[k] * g[k];
+        W[k] -= lr * (m[k] / c1) / (sqrt(v[k] / c2) + 0.00000001);
+    ::ext
+    rt 0;
+::ext
+```
+
+Call it once per parameter tensor after `ai::dense_backward`, for example
+`adam(W1, g1[0], mW1, vW1, 0.01, step, bc::len(W1));`.
+
+`bc::std` and `bc::var` work on one vector or f64_array. The per-column mean and standard
+deviation of a flat feature matrix are computed in the training program above (`fit_scaler`).
+
 
 ## Projects and Modules
 
@@ -780,8 +1349,7 @@ commands.
 
 ### A project, step by step
 
-Start with `csyc init`, which makes the folder, a `project.csp`, an entry file and a
-copy of the Cooler Compiler table:
+Start with `csyc init`, which makes the folder, a `project.csp`, an entry file and a copy of the Cooler Compiler table:
 
 ```bash
 csyc init myapp
@@ -1139,6 +1707,9 @@ csyc wipe --ccm-mem      # forget everything it remembers
 
 - The setting lives in `csyconf.json` in the project folder (`"cooler_compiler": true`).
   For a single `.csy` file, the folder of that file is used.
+- The folder is the project folder, or for a single `.csy` file the folder that holds that file.
+  A file in a subfolder such as `src/` has no `csyconf.json` there, so the Cooler Compiler stays
+  silent for it, and prints no note either.
 - The table must sit in the same folder. `csyc enable ccm` does not create it; in a folder
   without `ccm_table.bin` the compiler prints a note and compiles without the extra lines.
 - `csyc init` places `ccm_table.bin` in the new project. It is a data file, not part of
@@ -1161,8 +1732,7 @@ Behaviors that are easy to trip over. They are listed so you can work around the
 
 - Printing a comparison or logical expression needs parentheses (see Print Output).
 - `bc::round(x, 2)` ignores the second argument and rounds to a whole number.
-- `bc::min` and `bc::max` take numbers as separate arguments. Passing one vector does not
-  find its smallest or largest element.
+- `bc::min` and `bc::max` accept any number of numbers, or a single vector or f64_array.
 - `bc::int("abc")` returns `0` instead of an error. `bc::read_file` on a missing file
   returns `none`. `bc::sqrt(-1)` gives `nan`.
 - Strings are bytes: `bc::len("héllo")` is `6`, and `bc::upper` / `bc::lower` only change
@@ -1171,6 +1741,18 @@ Behaviors that are easy to trip over. They are listed so you can work around the
   list keys in different orders.
 - Runtime errors show line `0:0` in the header; the real line is in the message
   (`at top level, line 5`).
+- `==` and `!=` on two vectors, dicts or f64_arrays compare identity, not contents:
+  `[1, 2] == [1, 2]` is `false`, while `a == a` is `true`. Strings do compare by content. To compare
+  two vectors, loop over the elements (the training program's `count_correct` does this).
+- Assigning a vector, dict or f64_array does not copy it. `b = a` followed by `b[0] = 5` also changes
+  `a`. Use `bc::copy(a)` for an independent copy.
+- A NaN is never equal to anything, itself included. Test for it with `bc::isnan(x)`, or `x != x`.
+- A function that has its own parameter, loop variable or variable named like a math builtin (a
+  parameter called `exp`, say) keeps `bc::exp(x)` calls interpreted, because native code could not tell
+  the two apart. Rename the variable to keep the function native.
+- `bc::push` needs a vector. An f64_array has a fixed size, so pushing onto one is an error.
+- Status lines such as `[csy] running ...` go to stderr, so redirecting stdout captures only
+  what your program prints.
 
 ## Important Notes
 
@@ -1200,6 +1782,8 @@ Behaviors that are easy to trip over. They are listed so you can work around the
 - Functions that write module variables stay interpreted
 - Use packed arrays for AI model parameters
 - GPU operations available for large matrix operations
+
+For the change that matters most for speed (put loops inside functions) see Native JIT Eligibility. For the binary checkpoint format see Packed Float64 Arrays.
 
 ## Reserved Keywords
 
@@ -1243,7 +1827,7 @@ bc::log10(x);         # Base-10 logarithm
 # Additional math
 bc::sign(x);          # Sign of number (-1, 0, or 1)
 
-# AI activation functions (vectorized)
+# AI activation functions (work on a number, a vector or an f64_array)
 bc::sigmoid(x);       # Sigmoid: 1 / (1 + exp(-x))
 bc::relu(x);          # ReLU: max(0, x)
 bc::tanh(x);          # Hyperbolic tangent
@@ -1264,11 +1848,13 @@ W = bc::rand_mat(rows, cols, lo, hi);  # Matrix of random floats in [lo, hi)
 db = bc::sum_cols(matrix);  # Sum down each column, returns 1D vector
 
 # Argmax
-best_idx = bc::argmax(vector);  # Index of largest element
+best_idx = bc::argmax(vector);  # Index of largest element (vector or f64_array)
+picks = bc::argmax(flat, cols); # f64_array of rows * cols values: one index per row
 
 # Softmax
 probs = bc::softmax(vector);  # Convert scores to probability distribution
 # Works on 2D tensors (batch) row-by-row
+probs = bc::softmax(flat, cols);  # f64_array of rows * cols values, row by row
 ```
 
 ## Functional Operations
@@ -1606,12 +2192,33 @@ The compiler enforces safety limits:
 
 Functions are eligible for native JIT compilation if they:
 - Use only numeric operations (int, float, f64_array)
-- Don't call non-whitelisted builtins
+- Call only whitelisted builtins, as `sqrt(x)` or `bc::sqrt(x)` (see below)
 - Don't read/write module variables
+- Don't call `bc::len(x)` or other non-whitelisted builtins; pass lengths in as numbers
 - Don't use strings, vectors, or dicts
 - Have a compatible signature
 
 Use `--explain-native` to see why functions stay interpreted.
+
+### The rules that decide speed
+
+- **Put hot loops inside functions.** A top-level loop is only compiled natively when it is simple
+  enough, and a loop that indexes `table["columns"][name]` is not. Copying 30 Parquet columns of
+  500,000 rows into one flat array took 2.97 s in a top-level loop and 0.24 s once the loop body
+  was a function that takes the arrays and numbers as arguments.
+- **`sqrt(x)` and `bc::sqrt(x)` are the same to native code.** Both work, in functions and in
+  top-level loops, whatever name you gave the `#inc basic` alias. A loop of 4 million
+  `bc::sin` and `bc::sqrt` calls ran in 0.065 s, against 0.96 s when `bc::` calls kept the loop
+  interpreted. The one exception is a function that declares its own variable, parameter or loop
+  variable with the same name as the builtin; `--explain-native` reports that case.
+- **The whitelist** is: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sqrt`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `abs`, `sign`, `tanh`, `sigmoid`, `relu`, `sigmoid_deriv`, `relu_deriv`, `tanh_deriv`, `atan2`, `pow`, `clamp`, `max`, `min`, `isnan`, `isinf`. `max` and `min` stay native only with exactly two
+  numeric arguments; with more arguments or an array they run in the interpreter, which gives the
+  same answer more slowly.
+- **A comparison, `isnan` or `isinf` result can only be an `if` or `while` condition.** Storing or
+  returning it keeps the function interpreted. Count with `if isnan(x): c += 1;` rather than
+  `c += isnan(x);`.
+- **Vectors, strings, dicts and `push` are not native.** Pass arrays and numbers in, and keep the
+  list handling outside the hot function.
 
 ## GPU Module (NVIDIA)
 
@@ -1855,9 +2462,11 @@ doubled = bc::map(double, numbers);  # Use function name
 - The function must be defined before passing it
 - Do not include parentheses when passing the function
 
-### Error: "unknown builtin"
+### Error: "unknown builtin" / "has no member"
 
-**Problem:** Trying to use a builtin that doesn't exist or is misspelled.
+**Problem:** Trying to use a builtin that doesn't exist or is misspelled. The compiler usually
+catches this before the program runs, with `module 'basic' has no member 'name'` and a list of close
+names. `unknown builtin` is the same mistake caught at run time.
 
 ```csy
 # INCORRECT
@@ -1889,6 +2498,13 @@ sorted = bc::sort(mixed);  # ERROR
 ```
 
 **Solution:** Sort homogeneous vectors only - all numbers or all strings.
+
+### Error: "range expects one number"
+
+**Problem:** `bc::range(2, 5)` or `bc::range(0, 10, 3)`. CSy has only `range(n)`, which gives 0 to
+n - 1.
+
+**Solution:** Build the sequence with `for i in thru n:` and compute `start + i * step`.
 
 ### Error: "tensor nesting is too deep"
 

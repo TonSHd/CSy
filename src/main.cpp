@@ -41,7 +41,6 @@
 #include <cerrno>
 #include <algorithm>
 
-// Written by Claude, CSy maintainer
 
 using namespace csy;
 
@@ -53,7 +52,7 @@ static double profile_ms(ProfileClock::time_point started,
 }
 
 #ifndef CSYC_VERSION
-#define CSYC_VERSION "1.0.0"
+#define CSYC_VERSION "1.1.0"
 #endif
 
 extern "C" const char csyc_version_marker[] __attribute__((used)) = "CSYC-VERSION-MARKER:" CSYC_VERSION;
@@ -236,7 +235,7 @@ bool write_standalone_exe(const std::string& exe_path, const std::string& object
     self.seekg(0, std::ios::end);
     std::uint64_t total = static_cast<std::uint64_t>(self.tellg());
     runtime_size = total;
-    if (find_embedded_object(probe, &runtime_size)) { /* building from a packed exe: drop its payload */ }
+    if (find_embedded_object(probe, &runtime_size)) {   }
     std::string runtime(static_cast<std::size_t>(runtime_size), '\0');
     self.seekg(0);
     self.read(runtime.data(), static_cast<std::streamsize>(runtime_size));
@@ -279,15 +278,14 @@ int run_embedded_program(const std::string& image, int argc, char** argv) {
     if (!result.ok) { std::cerr << result.diags.format(""); return 1; }
     return result.exit_code;
 }
-} // namespace
+}
 
-// csyc init [path]: lay out a default project. Never overwrites a file; refuses a folder that already is a project.
 static int init_project(int argc, char** argv) {
     namespace fs = std::filesystem;
     if (argc > 3) { std::cerr << "error: usage is 'csyc init [path]'\n"; return 1; }
     std::error_code ec;
     fs::path target = fs::absolute(argc == 3 ? fs::path(argv[2]) : fs::path("."), ec).lexically_normal();
-    if (!target.has_filename() && target.has_parent_path()) target = target.parent_path();   // "dir/" and "." mean the folder itself
+    if (!target.has_filename() && target.has_parent_path()) target = target.parent_path();
     if (ec) { std::cerr << "error: cannot resolve the project path\n"; return 1; }
     if (fs::exists(target, ec) && !fs::is_directory(target, ec)) {
         std::cerr << "error: '" << target.string() << "' exists and is not a folder\n";
@@ -701,7 +699,7 @@ static int doctor_command(int argc, char** argv) {
 }
 
 static int csyc_main(int argc, char** argv) {
-    {   // A packed executable is just its program: no compiler behaviour, no banners.
+    {
         std::string embedded;
         if (find_embedded_object(embedded)) return run_embedded_program(embedded, argc, argv);
     }
@@ -713,11 +711,11 @@ static int csyc_main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "install") return install_self(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "doctor") return doctor_command(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "explain") return explain_command(argc, argv);
-    {   // Cooler Compiler commands: csyc enable ccm / disable ccm / wipe --ccm-mem
+    {
         const int command_code = ccm::handle_command(argc, argv);
         if (command_code >= 0) return command_code;
     }
-    ccm::begin(argc, argv);   // does nothing unless csyconf.json turns the Cooler Compiler on
+    ccm::begin(argc, argv);
     const auto main_started = ProfileClock::now();
     const bool profile = std::getenv("CSY_PROFILE") != nullptr;
     if (argc < 2) {
@@ -742,7 +740,7 @@ static int csyc_main(int argc, char** argv) {
         const unsigned long long parsed = std::strtoull(env_limit, &end, 10);
         if (env_limit[0] != '-' && errno == 0 && end != env_limit && *end == '\0') memory_limit_mb = parsed;
     }
-    unsigned int thread_limit = 0;  // 0 = auto
+    unsigned int thread_limit = 0;
     if (const char* env_threads = std::getenv("CSYC_THREADS")) {
         char* end = nullptr;
         errno = 0;
@@ -801,7 +799,7 @@ static int csyc_main(int argc, char** argv) {
             continue;
         }
         if (a == "--no-native") {
-            no_native = true;   // same as CSY_NO_NATIVE_JIT=1 for this run (fast builds, no C compiler step)
+            no_native = true;
             continue;
         }
         if (a == "-o") {
@@ -844,7 +842,6 @@ static int csyc_main(int argc, char** argv) {
     if (build_only && input_paths.empty()) input_paths.emplace_back("project.csp");
     if (!input_paths.empty()) ccm::set_subject(input_paths.front(), !build_only, false);
 
-    // A bare word with no extension that is not a file is a mistyped command, not a source file.
     if (!build_only && !run_command && input_paths.size() == 1 && input_paths[0] != "." &&
         std::filesystem::path(input_paths[0]).extension().empty()) {
         std::error_code exists_error;
@@ -855,19 +852,14 @@ static int csyc_main(int argc, char** argv) {
         }
     }
 
-    // Resolve the worker count once. "auto" means the CPUs this process may use
-    // (capped at 8); an explicit --threads N is honoured but never exceeds what
-    // the memory budget can hold (each worker may hold a file's worth of data).
     const unsigned int worker_threads = res::resolve_threads(
         thread_limit != 0 ? thread_limit : std::min(res::hardware_threads(), 8u),
         64ull * 1024 * 1024);
 
-    // `build -o <file>` names the output for any build (one source, several sources or a project.csp);
-    // for a project it overrides the `output` set in project.csp.
 
     res::install_cleanup_handlers();
     BuildGovernor resource_guard(memory_limit_mb);
-    res::set_tracking(true);  // heap accounting for the compile phase (switched off before user code runs)
+    res::set_tracking(true);
     if (run_command) {
         if (input_paths.size() != 1 || std::filesystem::path(input_paths.front()).extension() != ".cso") {
             std::cerr << "error: usage is 'csyc run <file.cso>'\n";
@@ -876,7 +868,6 @@ static int csyc_main(int argc, char** argv) {
         const std::filesystem::path artifact = input_paths.front();
         if (!resource_guard.acquire_build_slot()) return 1;
         if (!resource_guard.check("checking whether the object needs rebuilding")) return 1;
-        // ('run' may rebuild: those paths below use the same governor.)
         std::string rebuild_input;
         std::error_code fs_error;
         const bool artifact_exists = std::filesystem::is_regular_file(artifact, fs_error) && !fs_error;
@@ -896,8 +887,6 @@ static int csyc_main(int argc, char** argv) {
             rebuild_input = matching_source.string();
         }
 
-        // If this artifact is the configured output of project.csp, check all
-        // files actually loaded by the project, including #connect dependencies.
         std::vector<std::filesystem::path> project_candidates;
         project_candidates.emplace_back(std::filesystem::current_path() / "project.csp");
         for (auto dir = std::filesystem::absolute(artifact).parent_path(); !dir.empty();) {
@@ -982,9 +971,9 @@ static int csyc_main(int argc, char** argv) {
             std::cerr << "[csy] this object carries no native code (it was built without the native fast path)\n";
         }
         VM vm(std::move(program_args));
-        res::set_tracking(false);   // the compiler budget does not apply to the user's program
+        res::set_tracking(false);
         resource_guard.release_build_slot();
-        std::cout << "[csy] running compiled object " << input_paths[0] << "...\n";
+        std::cerr << "[csy] running compiled object " << input_paths[0] << "...\n";
         ccm::set_subject(input_paths[0], true, true);
         ccm::user_code(true);
         VMResult result = vm.run(object);
@@ -1016,8 +1005,6 @@ static int csyc_main(int argc, char** argv) {
     BuildProgress progress(verbose && !deep);
     if (verbose) std::cerr << "CSy is preparing a project build from '" << project_inputs.entry << "' using "
                            << worker_threads << " worker thread(s).\n";
-    // CSY_PROFILE: live and peak tracked heap at each stage boundary (peak is the high-water mark so far,
-    // so the stage that raised it is the one whose line shows the jump).
     const bool profile_memory = std::getenv("CSY_PROFILE") != nullptr;
     auto mem_mark = [profile_memory](const char* stage) {
         if (!profile_memory) return;
@@ -1081,21 +1068,18 @@ static int csyc_main(int argc, char** argv) {
             }
         }
     }
-    // `#connect "file.csy";` has no allowlist: it shares every public top-level name of that file (names that start with
-    // '_' stay private). The names are put into the statement here, so everything after this point (the checks below, the
-    // semantic pass, linking and code generation) sees exactly what an explicit allowlist would have given.
     for (const auto& unit : units) {
         for (const auto& s : unit.parsed.module.body) {
             if (s->kind != StmtKind::Connect || !s->connect_all) continue;
             const std::string dep = std::filesystem::weakly_canonical(
                 std::filesystem::path(unit.path).parent_path() / s->connect_path).string();
             auto target = by_path.find(dep);
-            if (target == by_path.end()) continue;   // reported just below
+            if (target == by_path.end()) continue;
             s->connect_exports = top_level_names(target->second->parsed.module, false);
         }
     }
     for (const auto& unit : units) {
-        std::unordered_map<std::string, std::pair<std::string, std::string>> file_connect_aliases;   // alias -> (target, location)
+        std::unordered_map<std::string, std::pair<std::string, std::string>> file_connect_aliases;
         for (const auto& s : unit.parsed.module.body) {
             if (s->kind == StmtKind::Connect) {
                 const std::string target = std::filesystem::weakly_canonical(
@@ -1131,8 +1115,6 @@ static int csyc_main(int argc, char** argv) {
                 std::cerr << "error: connected file was not loaded: '" << dep.string() << "'\n";
                 return 1;
             }
-            // Without an allowlist the file shares all of its public names, found above; with one, every listed name
-            // must exist at the top level of that file and must not be private.
             if (s->connect_all) continue;
             const std::vector<std::string> available_names = top_level_names(target->second->parsed.module, true);
             const std::unordered_set<std::string> available(available_names.begin(), available_names.end());
@@ -1157,12 +1139,6 @@ static int csyc_main(int argc, char** argv) {
         linked_ast.body.insert(linked_ast.body.end(), unit.parsed.module.body.begin(), unit.parsed.module.body.end());
     }
 
-    // ---- Semantic analysis ----
-    // Constructing the VM here (rather than later, at run time) is cheap -
-    // its constructor just populates the builtins_ map - and it gives us
-    // the *real* list of registered builtin names to validate bc::<name>
-    // member access against, instead of a second hardcoded copy that drifts
-    // out of sync every time a builtin gets added or renamed.
     stage_started = ProfileClock::now();
     const auto runtime_init_started = stage_started;
     VM vm(std::move(program_args));
@@ -1177,9 +1153,6 @@ static int csyc_main(int argc, char** argv) {
     const auto semantic_started = stage_started;
     std::vector<std::pair<std::string, std::string>> all_using_aliases;
     bool semantic_ok = true;
-    // Each unit is analysed independently, so the work spreads over the worker
-    // threads; results are printed afterwards in unit order, so the output is
-    // identical whatever the thread count.
     std::vector<SemanticResult> semantic_results(units.size());
     res::parallel_for(units.size(), worker_threads, [&](size_t i) {
         semantic_results[i] = analyze(units[i].parsed.module, units[i].source, builtin_names);
@@ -1279,14 +1252,13 @@ static int csyc_main(int argc, char** argv) {
         return 0;
     }
 
-    // ---- Run ----
     if (deep) std::cout << "[stage] running...\n";
-    else      std::cout << "[csy] running " << input_path << "...\n";
+    else      std::cerr << "[csy] running " << input_path << "...\n";
 
     stage_started = ProfileClock::now();
     const auto vm_started = stage_started;
     const uint64_t compile_peak_bytes = res::peak_tracked_bytes();
-    res::set_tracking(false);   // the compiler budget does not apply to the user's program
+    res::set_tracking(false);
     ccm::user_code(true);
     VMResult vm_r = vm.run(cg_r.module);
     ccm::user_code(false);
@@ -1328,7 +1300,7 @@ static int guarded_main(int argc, char** argv) {
         return 1;
     } catch (const std::bad_alloc&) {
         const bool budget = res::hard_limit_hit();
-        res::set_tracking(false);   // so reporting the error cannot itself hit the limit
+        res::set_tracking(false);
         res::remove_registered_temp_paths();
         if (budget) {
             std::cerr << "error: compiler memory budget (" << (res::limit_bytes() / (1024 * 1024))
@@ -1346,12 +1318,11 @@ static int guarded_main(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    // Run on a 512 MiB (lazily committed) stack so deep-but-legal nesting and recursion
-    // cannot overflow a small `ulimit -s`; the nesting limits are then the only bound.
     int code = 1;
     res::run_with_stack(512u * 1024u * 1024u, [&] {
         code = guarded_main(argc, argv);
-        ccm::finish(code);   // closing lines and the memory record; does nothing when the Cooler Compiler is off
+        ccm::finish(code);
     });
     return code;
 }
+

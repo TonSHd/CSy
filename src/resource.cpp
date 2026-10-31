@@ -1,5 +1,4 @@
 #include "resource.hpp"
-// Written by ChatGPT(codex)
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -202,9 +201,6 @@ bool within_budget(const char* stage) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Private per-user state directory (ledger lives here)
-// ---------------------------------------------------------------------------
 namespace {
 
 std::string private_dir() {
@@ -224,11 +220,9 @@ uint64_t proc_start_ticks(int pid) {
     const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
     std::fclose(f);
     buf[n] = '\0';
-    // comm may contain spaces/parentheses: field 3 starts after the LAST ')'.
     const char* p = std::strrchr(buf, ')');
     if (!p) return 0;
     ++p;
-    // fields after ')': state(3) ppid(4) ... starttime is field 22.
     int field = 3;
     while (*p && field < 22) {
         while (*p == ' ') ++p;
@@ -274,7 +268,7 @@ struct FlockGuard {
     ~FlockGuard() { if (ok) ::flock(fd, LOCK_UN); }
 };
 
-} // namespace
+}
 
 BuildLedger::~BuildLedger() { release(); }
 
@@ -372,15 +366,12 @@ void BuildLedger::release() {
     slot_ = -1;
 }
 
-// ---------------------------------------------------------------------------
-// Temp-file cleanup (async-signal-safe)
-// ---------------------------------------------------------------------------
 namespace {
 
 constexpr int kTempSlots = 32;
 constexpr size_t kTempPath = 1024;
 struct TempSlot {
-    std::atomic<int> state{0};  // 0 free, 1 in use, 2 being written
+    std::atomic<int> state{0};
     char path[kTempPath];
 };
 TempSlot g_temp[kTempSlots];
@@ -404,7 +395,7 @@ void on_fatal_signal(int sig) {
     ::raise(sig);
 }
 
-} // namespace
+}
 
 bool register_temp_path(const std::string& path) {
     if (path.empty() || path.size() >= kTempPath) return false;
@@ -452,9 +443,6 @@ void install_cleanup_handlers() {
     for (int sig : {SIGINT, SIGTERM, SIGHUP}) ::sigaction(sig, &sa, nullptr);
 }
 
-// ---------------------------------------------------------------------------
-// Threads
-// ---------------------------------------------------------------------------
 unsigned hardware_threads() {
     cpu_set_t set;
     CPU_ZERO(&set);
@@ -484,7 +472,6 @@ void* stack_thread_trampoline(void* arg) {
     static_cast<StackThreadStart*>(arg)->fn();
     return nullptr;
 }
-// Creates a joinable pthread with an explicit stack size. Returns false on failure.
 bool spawn_stack_thread(pthread_t& handle, size_t bytes, StackThreadStart* start) {
     pthread_attr_t attr;
     if (pthread_attr_init(&attr) != 0) return false;
@@ -494,7 +481,7 @@ bool spawn_stack_thread(pthread_t& handle, size_t bytes, StackThreadStart* start
     return ok;
 }
 constexpr size_t kWorkerStackBytes = 64u * 1024u * 1024u;
-} // namespace
+}
 
 void run_with_stack(size_t bytes, const std::function<void()>& fn) {
     for (size_t size = bytes; size >= 8u * 1024u * 1024u; size /= 4) {
@@ -534,10 +521,8 @@ void parallel_for(size_t count, unsigned threads, const std::function<void(size_
         }
         flush_thread();
     };
-    // Workers get an explicit, generous stack: the parser and semantic analysis recurse,
-    // and the default thread stack follows `ulimit -s`, which can be very small.
     std::vector<pthread_t> pool;
-    std::vector<StackThreadStart> starts;   // reserved up front so element addresses stay valid
+    std::vector<StackThreadStart> starts;
     pool.reserve(threads - 1);
     starts.reserve(threads - 1);
     for (unsigned t = 1; t < threads; ++t) {
@@ -545,7 +530,7 @@ void parallel_for(size_t count, unsigned threads, const std::function<void(size_
         pthread_t handle;
         if (!spawn_stack_thread(handle, kWorkerStackBytes, &starts.back())) {
             starts.pop_back();
-            break;  // thread limit reached: carry on with the workers we have
+            break;
         }
         pool.push_back(handle);
     }
@@ -554,14 +539,9 @@ void parallel_for(size_t count, unsigned threads, const std::function<void(size_
     if (first_error) std::rethrow_exception(first_error);
 }
 
-} // namespace res
-} // namespace csy
+}
+}
 
-// ---------------------------------------------------------------------------
-// Global allocation functions - route every C++ allocation through the
-// accounting above. All variants share malloc/free underneath, so mixing
-// sized/unsized/aligned forms is always consistent.
-// ---------------------------------------------------------------------------
 void* operator new(std::size_t n) {
     for (;;) {
         if (void* p = csy::res::alloc_or_null(n)) return p;
@@ -596,3 +576,4 @@ void operator delete(void* p, std::align_val_t) noexcept { csy::res::note_free(p
 void operator delete[](void* p, std::align_val_t) noexcept { csy::res::note_free(p); std::free(p); }
 void operator delete(void* p, std::size_t, std::align_val_t) noexcept { csy::res::note_free(p); std::free(p); }
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { csy::res::note_free(p); std::free(p); }
+

@@ -19,3 +19,4 @@ bool valid_utf8(const char* data, size_t size);
 
 }
 }
+

@@ -289,7 +289,7 @@ bool validate_module(const IRModule& module) {
                     break;
                 case Op::Q_BIN: case Op::Q_BIN_STORE: case Op::Q_BIN_JMPF:
                 case Op::Q_CMP_JMPF: case Op::Q_GETIDX:
-                    return false;   // internal opcodes never appear in a valid object
+                    return false;
             }
             if (depth < required || depth + delta < 0 || depth + delta > 1000000) return false;
             const int64_t after = depth + delta;
@@ -463,3 +463,4 @@ bool verify_module(const IRModule& module, std::string& why) {
 }
 
 }
+

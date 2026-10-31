@@ -2,6 +2,8 @@
 #include "pi.hpp"
 #include "vm.hpp"
 #include "value.hpp"
+#include "dataio.hpp"
+#include "fasthash.hpp"
 
 #include <cmath>
 #include <random>
@@ -19,11 +21,9 @@
 #include <cctype>
 #include <iostream>
 
-// this part is arounddd math func, tensor/matrix ops, string methods and random :3
 
 namespace csy {
 
-// fwd decl
 static bool eq_values_local(const Value& a, const Value& b);
 
 static double to_double(const Value& v) {
@@ -51,7 +51,6 @@ static long long to_int(const Value& v) {
     return 0;
 }
 
-// OOM kill.
 static constexpr long long kMaxTensorElems = 1LL << 27;
 static constexpr unsigned long long kMaxFileReadBytes = 1ULL << 30;
 
@@ -63,17 +62,27 @@ static void require_tensor_size(long long rows, long long cols, const char* what
     }
 }
 
-static Value apply_elementwise(const Value& v, double (*fn)(double), int depth = 0) {
+static Value apply_elementwise(const Value& v, double (*fn)(double), const std::string& name, int depth = 0) {
     if (depth > 256) {
         throw std::runtime_error("tensor nesting is too deep (is a vector containing itself?)");
     }
     if (v.type == Value::Vec) {
         std::vector<Value> out;
         out.reserve(v.vec_val->size());
-        for (const auto& el : *v.vec_val) out.push_back(apply_elementwise(el, fn, depth + 1));
+        for (const auto& el : *v.vec_val) out.push_back(apply_elementwise(el, fn, name, depth + 1));
         return Value::make_vec(std::move(out));
     }
-    return Value::make_float(fn(to_double(v)));
+    if (v.type == Value::F64Array) {
+        const std::vector<double>& src = *v.f64_array_val;
+        Value out = Value::make_f64_array(src.size());
+        std::vector<double>& dst = *out.f64_array_val;
+        for (size_t i = 0; i < src.size(); i++) dst[i] = fn(src[i]);
+        return out;
+    }
+    if (v.type == Value::Int || v.type == Value::Float || v.type == Value::Bool) {
+        return Value::make_float(fn(to_double(v)));
+    }
+    throw std::runtime_error("bc::" + name + " expects a number, a vector or an f64_array (got " + v.type_name() + ")");
 }
 
 static std::mt19937_64& rng() {
@@ -104,13 +113,181 @@ static Value call_callable(VM& vm, const Value& fn_val, std::vector<Value> call_
     return vm.call_function(fn_val.func_val->func_index, call_args, fn_val.func_val->upvalues);
 }
 
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the f64 checkpoint format stores little-endian doubles directly");
+
+static constexpr unsigned char kF64Magic[8] = {'C', 'S', 'Y', 'F', '6', '4', 0x00, 0x02};
+static constexpr size_t kF64HeaderBytes = 16;
+static constexpr size_t kF64TrailerBytes = 8;
+
+static void save_f64_file(const std::string& path, const std::vector<double>& values) {
+    if (values.size() > static_cast<size_t>(kMaxTensorElems)) {
+        throw std::runtime_error("save_f64: " + std::to_string(values.size()) + " values is above the limit of " +
+                                 std::to_string(kMaxTensorElems));
+    }
+    const uint64_t count = values.size();
+    const size_t payload = values.size() * sizeof(double);
+    dataio::AtomicWriter writer(path, "save_f64");
+    unsigned char head[kF64HeaderBytes];
+    std::memcpy(head, kF64Magic, 8);
+    std::memcpy(head + 8, &count, 8);
+    writer.write(reinterpret_cast<const char*>(head), kF64HeaderBytes);
+    if (payload > 0) writer.write(reinterpret_cast<const char*>(values.data()), payload);
+    const uint64_t sum = hash64_fast(values.data(), payload, count);
+    unsigned char tail[kF64TrailerBytes];
+    std::memcpy(tail, &sum, 8);
+    writer.write(reinterpret_cast<const char*>(tail), kF64TrailerBytes);
+    writer.commit();
+}
+
+static Value load_f64_text(std::ifstream& in, uintmax_t checkpoint_bytes) {
+    constexpr unsigned long long max_values = 16ULL * 1024 * 1024;
+    constexpr uintmax_t max_text_bytes = 128ULL * 1024 * 1024;
+    if (checkpoint_bytes > max_text_bytes) {
+        throw std::runtime_error("load_f64: text checkpoint exceeds the 128 MiB limit; save it again to convert it to the binary format");
+    }
+    std::string magic;
+    int version = 0;
+    unsigned long long count = 0;
+    if (!(in >> magic >> version >> count) || magic != "CSYF64" || version != 1) {
+        throw std::runtime_error("load_f64: not a CSy f64 checkpoint (unrecognized header)");
+    }
+    if (count > std::vector<double>().max_size() || count > max_values || count > checkpoint_bytes) {
+        throw std::runtime_error("load_f64: checkpoint is too large");
+    }
+    Value result = Value::make_f64_array(static_cast<std::size_t>(count));
+    for (std::size_t i = 0; i < static_cast<std::size_t>(count); ++i) {
+        double value = 0.0;
+        if (!(in >> value)) throw std::runtime_error("load_f64: truncated or malformed text checkpoint data");
+        (*result.f64_array_val)[i] = value;
+    }
+    std::string extra;
+    if (in >> extra) throw std::runtime_error("load_f64: unexpected data after the checkpoint values");
+    return result;
+}
+
+static Value load_f64_file(const std::string& path) {
+    std::error_code ec;
+    if (std::filesystem::is_directory(path, ec)) {
+        throw std::runtime_error("load_f64: '" + path + "' is a directory, not a file");
+    }
+    const uintmax_t bytes = std::filesystem::file_size(path, ec);
+    if (ec) throw std::runtime_error("load_f64: cannot open '" + path + "' (no such file or unreadable)");
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("load_f64: cannot open '" + path + "'");
+
+    unsigned char head[kF64HeaderBytes] = {};
+    in.read(reinterpret_cast<char*>(head), kF64HeaderBytes);
+    const bool is_binary = in.gcount() >= 8 && std::memcmp(head, kF64Magic, 8) == 0;
+    if (!is_binary) {
+        in.clear();
+        in.seekg(0);
+        return load_f64_text(in, bytes);
+    }
+
+    if (in.gcount() != static_cast<std::streamsize>(kF64HeaderBytes) || bytes < kF64HeaderBytes + kF64TrailerBytes) {
+        throw std::runtime_error("load_f64: '" + path + "' is truncated");
+    }
+    uint64_t count = 0;
+    std::memcpy(&count, head + 8, 8);
+    if (count > static_cast<uint64_t>(kMaxTensorElems)) {
+        throw std::runtime_error("load_f64: checkpoint declares " + std::to_string(count) +
+                                 " values, above the limit of " + std::to_string(kMaxTensorElems));
+    }
+    const uintmax_t expected = kF64HeaderBytes + static_cast<uintmax_t>(count) * sizeof(double) + kF64TrailerBytes;
+    if (bytes != expected) {
+        throw std::runtime_error("load_f64: the size of '" + path + "' does not match its header, the file is truncated or corrupt");
+    }
+    Value result = Value::make_f64_array(static_cast<size_t>(count));
+    std::vector<double>& data = *result.f64_array_val;
+    const size_t payload = data.size() * sizeof(double);
+    if (payload > 0) in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(payload));
+    unsigned char tail[kF64TrailerBytes];
+    in.read(reinterpret_cast<char*>(tail), kF64TrailerBytes);
+    if (!in) throw std::runtime_error("load_f64: reading '" + path + "' failed");
+    uint64_t want = 0;
+    std::memcpy(&want, tail, 8);
+    if (hash64_fast(data.data(), payload, count) != want) {
+        throw std::runtime_error("load_f64: the checksum does not match, '" + path + "' is corrupt");
+    }
+    return result;
+}
+
+static double variance_of(const std::string& name, const std::vector<Value>& args) {
+    if (args.empty() || args.size() > 2) {
+        throw std::runtime_error("bc::" + name + " expects (values) or (values, ddof)");
+    }
+    long long ddof = 0;
+    if (args.size() == 2) {
+        if (args[1].type != Value::Int || args[1].int_val < 0) {
+            throw std::runtime_error("bc::" + name + ": ddof must be a non-negative integer");
+        }
+        ddof = args[1].int_val;
+    }
+    const Value& v = args[0];
+    const std::vector<double>* packed = nullptr;
+    const std::vector<Value>* items = nullptr;
+    if (v.type == Value::F64Array) packed = v.f64_array_val.get();
+    else if (v.type == Value::Vec) items = v.vec_val.get();
+    else throw std::runtime_error("bc::" + name + " expects a vector or an f64_array (got " + v.type_name() + ")");
+    const size_t n = packed ? packed->size() : items->size();
+    if (n == 0) throw std::runtime_error("bc::" + name + " of an empty collection");
+    if (static_cast<unsigned long long>(n) <= static_cast<unsigned long long>(ddof)) {
+        throw std::runtime_error("bc::" + name + " needs more than " + std::to_string(ddof) + " values");
+    }
+    auto at = [&](size_t i) -> double {
+        if (packed) return (*packed)[i];
+        const Value& e = (*items)[i];
+        if (e.type != Value::Int && e.type != Value::Float && e.type != Value::Bool) {
+            throw std::runtime_error("bc::" + name + " expects numbers (got " + e.type_name() + ")");
+        }
+        return to_double(e);
+    };
+    long double sum = 0.0L;
+    for (size_t i = 0; i < n; i++) sum += at(i);
+    const long double mean = sum / static_cast<long double>(n);
+    long double squares = 0.0L;
+    for (size_t i = 0; i < n; i++) {
+        const long double d = static_cast<long double>(at(i)) - mean;
+        squares += d * d;
+    }
+    return static_cast<double>(squares / static_cast<long double>(n - static_cast<size_t>(ddof)));
+}
+
+static Value deep_copy_value(const Value& v, int depth) {
+    if (depth > 256) {
+        throw std::runtime_error("bc::copy: nesting is too deep (is a collection containing itself?)");
+    }
+    switch (v.type) {
+        case Value::Vec: {
+            std::vector<Value> items;
+            items.reserve(v.vec_val->size());
+            for (const Value& e : *v.vec_val) items.push_back(deep_copy_value(e, depth + 1));
+            return Value::make_vec(std::move(items));
+        }
+        case Value::F64Array: {
+            const std::vector<double>& src = *v.f64_array_val;
+            Value out = Value::make_f64_array(0);
+            out.f64_array_val->assign(src.begin(), src.end());
+            return out;
+        }
+        case Value::Dict: {
+            std::unordered_map<std::string, Value> copy;
+            copy.reserve(v.dict_val->size());
+            for (const auto& kv : *v.dict_val) copy.emplace(kv.first, deep_copy_value(kv.second, depth + 1));
+            return Value::make_dict(std::move(copy));
+        }
+        default:
+            return v;
+    }
+}
+
 void register_extended_builtins(VM& vm) {
     auto& builtins = vm.builtins_table();
 
     auto add_math1 = [&](const std::string& name, double (*fn)(double)) {
-        builtins[name] = [fn](VM&, std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::make_float(fn(0.0));
-            return apply_elementwise(args[0], fn);
+        builtins[name] = [fn, name](VM&, std::vector<Value>& args) -> Value {
+            if (args.empty()) throw std::runtime_error("bc::" + name + " expects a number, a vector or an f64_array");
+            return apply_elementwise(args[0], fn, name);
         };
     };
     add_math1("sin",   std::sin);
@@ -148,20 +325,134 @@ void register_extended_builtins(VM& vm) {
         return Value::make_float(std::pow(base, exp));
     };
 
-    builtins["max"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.size() < 2) return args.empty() ? Value::make_none() : args[0];
-        // If both int, return int; otherwise float.
-        if (args[0].type == Value::Int && args[1].type == Value::Int) {
-            return Value::make_int(std::max(args[0].int_val, args[1].int_val));
+    auto extreme = [](const char* name, bool want_max, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw std::runtime_error(std::string("bc::") + name + " expects numbers, a vector or an f64_array");
+        auto better = [want_max](double x, double best) {
+            if (std::isnan(best)) return !std::isnan(x);
+            return want_max ? x > best : x <= best;
+        };
+        if (args.size() == 1 && args[0].type == Value::F64Array) {
+            const std::vector<double>& d = *args[0].f64_array_val;
+            if (d.empty()) throw std::runtime_error(std::string("bc::") + name + " of an empty f64_array");
+            double best = d[0];
+            for (size_t i = 1; i < d.size(); i++) if (better(d[i], best)) best = d[i];
+            return Value::make_float(best);
         }
-        return Value::make_float(std::max(to_double(args[0]), to_double(args[1])));
+        const std::vector<Value>* items = &args;
+        if (args.size() == 1 && args[0].type == Value::Vec) {
+            items = args[0].vec_val.get();
+            if (items->empty()) throw std::runtime_error(std::string("bc::") + name + " of an empty vector");
+        }
+        if (items->size() == 1) {
+            const Value& only = (*items)[0];
+            if (only.type != Value::Int && only.type != Value::Float && only.type != Value::Bool) {
+                throw std::runtime_error(std::string("bc::") + name + " expects numbers (got " + only.type_name() + ")");
+            }
+            return only;
+        }
+        bool all_int = true;
+        for (const Value& e : *items) {
+            if (e.type != Value::Int && e.type != Value::Float && e.type != Value::Bool) {
+                throw std::runtime_error(std::string("bc::") + name + " expects numbers (got " + e.type_name() + ")");
+            }
+            if (e.type != Value::Int) all_int = false;
+        }
+        if (all_int) {
+            long long best = (*items)[0].int_val;
+            for (const Value& e : *items) best = want_max ? std::max(best, e.int_val) : std::min(best, e.int_val);
+            return Value::make_int(best);
+        }
+        double best = to_double((*items)[0]);
+        for (const Value& e : *items) if (better(to_double(e), best)) best = to_double(e);
+        return Value::make_float(best);
     };
-    builtins["min"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.size() < 2) return args.empty() ? Value::make_none() : args[0];
-        if (args[0].type == Value::Int && args[1].type == Value::Int) {
-            return Value::make_int(std::min(args[0].int_val, args[1].int_val));
+    builtins["max"] = [extreme](VM&, std::vector<Value>& args) -> Value { return extreme("max", true, args); };
+    builtins["min"] = [extreme](VM&, std::vector<Value>& args) -> Value { return extreme("min", false, args); };
+
+    builtins["isnan"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() != 1) throw std::runtime_error("bc::isnan expects one number");
+        const Value& v = args[0];
+        if (v.type == Value::Float) return Value::make_bool(std::isnan(v.float_val));
+        if (v.type == Value::Int || v.type == Value::Bool) return Value::make_bool(false);
+        throw std::runtime_error(std::string("bc::isnan expects a number (got ") + v.type_name() + ")");
+    };
+    builtins["isinf"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() != 1) throw std::runtime_error("bc::isinf expects one number");
+        const Value& v = args[0];
+        if (v.type == Value::Float) return Value::make_bool(std::isinf(v.float_val));
+        if (v.type == Value::Int || v.type == Value::Bool) return Value::make_bool(false);
+        throw std::runtime_error(std::string("bc::isinf expects a number (got ") + v.type_name() + ")");
+    };
+
+    builtins["var"] = [](VM&, std::vector<Value>& args) -> Value {
+        return Value::make_float(variance_of("var", args));
+    };
+    builtins["std"] = [](VM&, std::vector<Value>& args) -> Value {
+        return Value::make_float(std::sqrt(variance_of("std", args)));
+    };
+
+    builtins["shuffle"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() != 1 || (args[0].type != Value::Vec && args[0].type != Value::F64Array)) {
+            throw std::runtime_error(std::string("bc::shuffle expects a vector or an f64_array") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
         }
-        return Value::make_float(std::min(to_double(args[0]), to_double(args[1])));
+        auto fisher_yates = [](auto& data) {
+            for (size_t i = data.size(); i > 1; i--) {
+                std::uniform_int_distribution<size_t> pick(0, i - 1);
+                std::swap(data[i - 1], data[pick(rng())]);
+            }
+        };
+        if (args[0].type == Value::F64Array) {
+            const std::vector<double>& src = *args[0].f64_array_val;
+            Value out = Value::make_f64_array(0);
+            out.f64_array_val->assign(src.begin(), src.end());
+            fisher_yates(*out.f64_array_val);
+            return out;
+        }
+        std::vector<Value> items = *args[0].vec_val;
+        fisher_yates(items);
+        return Value::make_vec(std::move(items));
+    };
+
+    builtins["slice"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || args.size() > 3) {
+            throw std::runtime_error("bc::slice expects (collection, start) or (collection, start, end)");
+        }
+        const Value& c = args[0];
+        if (c.type == Value::Str) {
+            throw std::runtime_error("bc::slice works on vectors and f64_arrays; use bc::substr for strings");
+        }
+        if (c.type != Value::Vec && c.type != Value::F64Array) {
+            throw std::runtime_error(std::string("bc::slice expects a vector or an f64_array (got ") + c.type_name() + ")");
+        }
+        for (size_t k = 1; k < args.size(); k++) {
+            if (args[k].type != Value::Int) throw std::runtime_error("bc::slice: start and end must be integers");
+        }
+        const long long n = c.type == Value::Vec ? static_cast<long long>(c.vec_val->size())
+                                                 : static_cast<long long>(c.f64_array_val->size());
+        const long long start_arg = args[1].int_val;
+        const long long end_arg = args.size() == 3 ? args[2].int_val : n;
+        long long first = start_arg;
+        long long last = end_arg;
+        if (first < 0) first += n;
+        if (args.size() == 3 && last < 0) last += n;
+        if (first < 0 || last < first || last > n) {
+            throw std::runtime_error("bc::slice: range [" + std::to_string(start_arg) + ", " +
+                                     std::to_string(end_arg) + ") is outside a collection of length " +
+                                     std::to_string(n));
+        }
+        if (c.type == Value::F64Array) {
+            Value out = Value::make_f64_array(0);
+            out.f64_array_val->assign(c.f64_array_val->begin() + first, c.f64_array_val->begin() + last);
+            return out;
+        }
+        std::vector<Value> part(c.vec_val->begin() + first, c.vec_val->begin() + last);
+        return Value::make_vec(std::move(part));
+    };
+
+    builtins["copy"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() != 1) throw std::runtime_error("bc::copy expects one value");
+        return deep_copy_value(args[0], 0);
     };
 
     builtins["clamp"] = [](VM&, std::vector<Value>& args) -> Value {
@@ -169,6 +460,7 @@ void register_extended_builtins(VM& vm) {
         double x = to_double(args[0]);
         double lo = to_double(args[1]);
         double hi = to_double(args[2]);
+        if (std::isnan(x) || std::isnan(lo) || std::isnan(hi)) return Value::make_float(std::numeric_limits<double>::quiet_NaN());
         return Value::make_float(std::max(lo, std::min(x, hi)));
     };
 
@@ -205,7 +497,7 @@ void register_extended_builtins(VM& vm) {
         if (args.empty()) return Value::make_int(0);
         if (args.size() == 1) {
             long long lo = 0, hi = to_int(args[0]);
-            if (hi < lo) std::swap(lo, hi);  // randint(-5) == randint(-5, 0), never UB
+            if (hi < lo) std::swap(lo, hi);
             std::uniform_int_distribution<long long> dist(lo, hi);
             return Value::make_int(dist(rng()));
         }
@@ -348,6 +640,11 @@ void register_extended_builtins(VM& vm) {
     builtins["shape"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty()) return Value::make_vec({});
         const auto& v = args[0];
+        if (v.type == Value::F64Array) {
+            std::vector<Value> dims;
+            dims.push_back(Value::make_int((long long)v.f64_array_val->size()));
+            return Value::make_vec(std::move(dims));
+        }
         if (v.type != Value::Vec) return Value::make_vec({});
         std::vector<Value> result;
         result.push_back(Value::make_int((long long)v.vec_val->size()));
@@ -406,17 +703,22 @@ void register_extended_builtins(VM& vm) {
 
     builtins["dot"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 2) return Value::make_float(0.0);
-        if (args[0].type != Value::Vec || args[1].type != Value::Vec) {
-            throw std::runtime_error("dot requires two vectors");
+        const bool a_ok = args[0].type == Value::Vec || args[0].type == Value::F64Array;
+        const bool b_ok = args[1].type == Value::Vec || args[1].type == Value::F64Array;
+        if (!a_ok || !b_ok) {
+            throw std::runtime_error("dot requires two vectors or f64_arrays");
         }
-        const auto& a = *args[0].vec_val;
-        const auto& b = *args[1].vec_val;
-        if (a.size() != b.size()) {
+        const size_t na = args[0].type == Value::Vec ? args[0].vec_val->size() : args[0].f64_array_val->size();
+        const size_t nb = args[1].type == Value::Vec ? args[1].vec_val->size() : args[1].f64_array_val->size();
+        if (na != nb) {
             throw std::runtime_error("dot: vectors must have the same length");
         }
+        auto at = [](const Value& v, size_t i) {
+            return v.type == Value::F64Array ? (*v.f64_array_val)[i] : to_double((*v.vec_val)[i]);
+        };
         double sum = 0.0;
-        for (size_t i = 0; i < a.size(); i++) {
-            sum += to_double(a[i]) * to_double(b[i]);
+        for (size_t i = 0; i < na; i++) {
+            sum += at(args[0], i) * at(args[1], i);
         }
         return Value::make_float(sum);
     };
@@ -439,9 +741,14 @@ void register_extended_builtins(VM& vm) {
     };
 
     builtins["sum_cols"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.empty() || args[0].type != Value::Vec || args[0].vec_val->empty()) {
-            return Value::make_vec({});
+        if (args.empty() || (args[0].type != Value::Vec && args[0].type != Value::F64Array)) {
+            throw std::runtime_error(std::string("bc::sum_cols requires a 2D tensor (a nested vector)") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
         }
+        if (args[0].type == Value::F64Array) {
+            throw std::runtime_error("bc::sum_cols requires a 2D tensor (a nested vector); an f64_array is one-dimensional");
+        }
+        if (args[0].vec_val->empty()) return Value::make_vec({});
         const auto& v = *args[0].vec_val;
         if (v[0].type != Value::Vec) {
             throw std::runtime_error("sum_cols requires a 2D tensor");
@@ -474,9 +781,37 @@ void register_extended_builtins(VM& vm) {
     };
 
     builtins["argmax"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.empty() || args[0].type != Value::Vec || args[0].vec_val->empty()) {
-            return Value::make_int(-1);
+        if (args.empty() || (args[0].type != Value::Vec && args[0].type != Value::F64Array)) {
+            throw std::runtime_error(std::string("bc::argmax expects a vector or an f64_array") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
         }
+        if (args[0].type == Value::F64Array) {
+            const std::vector<double>& d = *args[0].f64_array_val;
+            if (args.size() >= 2) {
+                if (args[1].type != Value::Int || args[1].int_val <= 0 ||
+                    d.size() % static_cast<size_t>(args[1].int_val) != 0) {
+                    throw std::runtime_error("bc::argmax: cols must be a positive integer that divides the f64_array length");
+                }
+                const size_t cols = static_cast<size_t>(args[1].int_val);
+                const size_t rows = d.size() / cols;
+                std::vector<Value> picks;
+                picks.reserve(rows);
+                for (size_t r = 0; r < rows; r++) {
+                    size_t best_c = 0;
+                    for (size_t c = 1; c < cols; c++) {
+                        if (d[r * cols + c] > d[r * cols + best_c]) best_c = c;
+                    }
+                    picks.push_back(Value::make_int(static_cast<long long>(best_c)));
+                }
+                return Value::make_vec(std::move(picks));
+            }
+            if (d.empty()) return Value::make_int(-1);
+            size_t best_i = 0;
+            for (size_t i = 1; i < d.size(); i++) if (d[i] > d[best_i]) best_i = i;
+            return Value::make_int(static_cast<long long>(best_i));
+        }
+        if (args.size() >= 2) throw std::runtime_error("bc::argmax: cols applies only to an f64_array");
+        if (args[0].vec_val->empty()) return Value::make_int(-1);
         const auto& v = *args[0].vec_val;
         size_t best = 0;
         double best_val = to_double(v[0]);
@@ -503,12 +838,46 @@ void register_extended_builtins(VM& vm) {
             for (double e : exps) out.push_back(Value::make_float(sum > 0.0 ? e / sum : 0.0));
             return Value::make_vec(std::move(out));
         };
-        if (args.empty() || args[0].type != Value::Vec) return Value::make_vec({});
+        if (args.empty() || (args[0].type != Value::Vec && args[0].type != Value::F64Array)) {
+            throw std::runtime_error(std::string("bc::softmax expects a vector, a nested vector or an f64_array") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
+        }
+        if (args[0].type == Value::F64Array) {
+            const std::vector<double>& d = *args[0].f64_array_val;
+            size_t cols = d.size();
+            if (args.size() >= 2) {
+                if (args[1].type != Value::Int || args[1].int_val <= 0 ||
+                    d.size() % static_cast<size_t>(args[1].int_val) != 0) {
+                    throw std::runtime_error("bc::softmax: cols must be a positive integer that divides the f64_array length");
+                }
+                cols = static_cast<size_t>(args[1].int_val);
+            }
+            Value out = Value::make_f64_array(d.size());
+            std::vector<double>& o = *out.f64_array_val;
+            if (d.empty()) return out;
+            const size_t rows = d.size() / cols;
+            for (size_t r = 0; r < rows; r++) {
+                const size_t base = r * cols;
+                double mx = d[base];
+                for (size_t c = 1; c < cols; c++) mx = std::max(mx, d[base + c]);
+                double sum = 0.0;
+                for (size_t c = 0; c < cols; c++) {
+                    o[base + c] = std::exp(d[base + c] - mx);
+                    sum += o[base + c];
+                }
+                for (size_t c = 0; c < cols; c++) o[base + c] = sum > 0.0 ? o[base + c] / sum : 0.0;
+            }
+            return out;
+        }
+        if (args.size() >= 2) throw std::runtime_error("bc::softmax: cols applies only to an f64_array");
         const auto& v = *args[0].vec_val;
         if (!v.empty() && v[0].type == Value::Vec) {
             std::vector<Value> rows;
             rows.reserve(v.size());
-            for (const auto& row : v) rows.push_back(softmax_1d(*row.vec_val));
+            for (const auto& row : v) {
+                if (row.type != Value::Vec) throw std::runtime_error("bc::softmax: every row of a nested vector must be a vector");
+                rows.push_back(softmax_1d(*row.vec_val));
+            }
             return Value::make_vec(std::move(rows));
         }
         return softmax_1d(v);
@@ -653,9 +1022,20 @@ void register_extended_builtins(VM& vm) {
         return (*args[0].vec_val)[i];
     };
     builtins["join"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.empty() || args[0].type != Value::Vec) return Value::make_str("");
+        if (args.empty() || (args[0].type != Value::Vec && args[0].type != Value::F64Array)) {
+            throw std::runtime_error(std::string("bc::join expects a vector or an f64_array") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
+        }
         std::string sep = args.size() > 1 && args[1].type == Value::Str ? *args[1].str_val : " ";
         std::string out;
+        if (args[0].type == Value::F64Array) {
+            const std::vector<double>& d = *args[0].f64_array_val;
+            for (size_t i = 0; i < d.size(); i++) {
+                if (i) out += sep;
+                out += Value::make_float(d[i]).to_display();
+            }
+            return Value::make_str(std::move(out));
+        }
         const auto& items = *args[0].vec_val;
         for (size_t i = 0; i < items.size(); i++) {
             if (i) out += sep;
@@ -680,7 +1060,14 @@ void register_extended_builtins(VM& vm) {
             if (args[1].type != Value::Str) return Value::make_bool(false);
             return Value::make_bool(args[0].dict_val->count(*args[1].str_val) > 0);
         }
-        return Value::make_bool(false);
+        if (args[0].type == Value::F64Array) {
+            if (args[1].type != Value::Int && args[1].type != Value::Float) return Value::make_bool(false);
+            const double needle = to_double(args[1]);
+            for (const double x : *args[0].f64_array_val) if (x == needle) return Value::make_bool(true);
+            return Value::make_bool(false);
+        }
+        throw std::runtime_error(std::string("bc::contains expects a string, vector, dict or f64_array (got ") +
+                                 args[0].type_name() + ")");
     };
     builtins["has"] = builtins["contains"];
     builtins["keys"] = [](VM&, std::vector<Value>& args) -> Value {
@@ -698,21 +1085,40 @@ void register_extended_builtins(VM& vm) {
         return Value::make_vec(std::move(out));
     };
     builtins["reverse"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.empty()) return Value::make_vec({});
+        if (args.empty()) throw std::runtime_error("bc::reverse expects a vector, string or f64_array");
         if (args[0].type == Value::Vec) {
             std::vector<Value> v = *args[0].vec_val;
             std::reverse(v.begin(), v.end());
             return Value::make_vec(std::move(v));
+        }
+        if (args[0].type == Value::F64Array) {
+            Value out = Value::make_f64_array(0);
+            *out.f64_array_val = *args[0].f64_array_val;
+            std::reverse(out.f64_array_val->begin(), out.f64_array_val->end());
+            return out;
         }
         if (args[0].type == Value::Str) {
             std::string s = *args[0].str_val;
             std::reverse(s.begin(), s.end());
             return Value::make_str(s);
         }
-        return args[0];
+        throw std::runtime_error(std::string("bc::reverse expects a vector, string or f64_array (got ") + args[0].type_name() + ")");
     };
     builtins["sort"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.empty() || args[0].type != Value::Vec) return Value::make_vec({});
+        if (args.empty() || (args[0].type != Value::Vec && args[0].type != Value::F64Array)) {
+            throw std::runtime_error(std::string("bc::sort expects a vector or an f64_array") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
+        }
+        if (args[0].type == Value::F64Array) {
+            Value out = Value::make_f64_array(0);
+            *out.f64_array_val = *args[0].f64_array_val;
+            std::stable_sort(out.f64_array_val->begin(), out.f64_array_val->end(), [](double x, double y) {
+                if (std::isnan(x)) return false;
+                if (std::isnan(y)) return true;
+                return x < y;
+            });
+            return out;
+        }
         const std::vector<Value>& src = *args[0].vec_val;
         bool all_int = true, all_num = true, all_str = true;
         for (const auto& v : src) {
@@ -759,7 +1165,6 @@ void register_extended_builtins(VM& vm) {
             : "sort() only orders numbers or strings (found a " + found + ")");
     };
 
-    // dicts and classes
     builtins["dict_merge"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 2 || args[0].type != Value::Dict || args[1].type != Value::Dict) {
             throw std::runtime_error("dict_merge expects two dicts");
@@ -790,7 +1195,7 @@ void register_extended_builtins(VM& vm) {
     builtins["sleep"] = [](VM&, std::vector<Value>& args) -> Value {
         double secs = args.empty() ? 0.0 : to_double(args[0]);
         if (secs > 0 && std::isfinite(secs)) {
-            if (secs > 86400.0) secs = 86400.0;  // cap at a day; also avoids int overflow
+            if (secs > 86400.0) secs = 86400.0;
             std::cout.flush();
             std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>(secs * 1000)));
         }
@@ -854,45 +1259,14 @@ void register_extended_builtins(VM& vm) {
             args[1].type != Value::F64Array || !args[1].f64_array_val) {
             throw std::runtime_error("save_f64 expects (filename, f64_array)");
         }
-        std::ofstream out(*args[0].str_val, std::ios::binary | std::ios::trunc);
-        if (!out) return Value::make_bool(false);
-        out << "CSYF64 1\n" << args[1].f64_array_val->size() << '\n'
-            << std::setprecision(std::numeric_limits<double>::max_digits10);
-        for (double x : *args[1].f64_array_val) out << x << '\n';
-        out.close();
-        return Value::make_bool(out.good());
+        save_f64_file(*args[0].str_val, *args[1].f64_array_val);
+        return Value::make_bool(true);
     };
     builtins["load_f64"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() != 1 || args[0].type != Value::Str) {
             throw std::runtime_error("load_f64 expects a filename");
         }
-        std::error_code size_error;
-        const auto checkpoint_bytes = std::filesystem::file_size(*args[0].str_val, size_error);
-        constexpr unsigned long long max_values = 16ULL * 1024 * 1024;
-        constexpr uintmax_t max_checkpoint_bytes = 128ULL * 1024 * 1024;
-        if (size_error || checkpoint_bytes > max_checkpoint_bytes) {
-            throw std::runtime_error("f64 checkpoint exceeds the 128 MiB safety limit or cannot be sized");
-        }
-        std::ifstream in(*args[0].str_val, std::ios::binary);
-        if (!in) throw std::runtime_error("cannot open f64 checkpoint '" + *args[0].str_val + "'");
-        std::string magic;
-        int version = 0;
-        unsigned long long count = 0;
-        if (!(in >> magic >> version >> count) || magic != "CSYF64" || version != 1) {
-            throw std::runtime_error("invalid or unsupported f64 checkpoint header");
-        }
-        if (count > std::vector<double>().max_size() || count > max_values || count > checkpoint_bytes) {
-            throw std::runtime_error("f64 checkpoint is too large");
-        }
-        Value result = Value::make_f64_array(static_cast<std::size_t>(count));
-        for (std::size_t i = 0; i < static_cast<std::size_t>(count); ++i) {
-            double value = 0.0;
-            if (!(in >> value)) throw std::runtime_error("truncated or malformed f64 checkpoint data");
-            (*result.f64_array_val)[i] = value;
-        }
-        std::string extra;
-        if (in >> extra) throw std::runtime_error("unexpected data after f64 checkpoint values");
-        return result;
+        return load_f64_file(*args[0].str_val);
     };
 
     builtins["exit"] = [](VM&, std::vector<Value>& args) -> Value {
@@ -929,3 +1303,4 @@ static bool eq_values_local(const Value& a, const Value& b) {
 }
 
 }
+

@@ -3,11 +3,11 @@
 #include "ast.hpp"
 #include "ir.hpp"
 #include "diagnostic.hpp"
+
 #include <vector>
 #include <string>
 #include <utility>
 
-// hewooo
 
 namespace csy {
 
@@ -23,3 +23,4 @@ CodegenResult generate(const Module& ast,
                        const std::vector<std::string>& builtin_names);
 
 }
+

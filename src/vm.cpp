@@ -38,11 +38,14 @@ void VM::register_builtins() {
         return Value::make_none();
     };
     builtins_["range"] = [](VM& vm, std::vector<Value>& args) -> Value {
-        if (args.empty()) return Value::make_vec({});
+        if (args.size() != 1) {
+            throw std::runtime_error("range expects one number: range(n) gives 0 to n - 1 (got " +
+                std::to_string(args.size()) + " arguments)");
+        }
         long long n = 0;
         if (args[0].type == Value::Int) n = args[0].int_val;
         else if (args[0].type == Value::Float) n = (long long)args[0].float_val;
-        else return Value::make_vec({});
+        else throw std::runtime_error("range expects a number, got " + args[0].type_name());
         std::vector<Value> items;
         if (n < 0) n = 0;
         if (n > 50000000LL) {
@@ -98,8 +101,13 @@ void VM::register_builtins() {
         return Value::make_int(0);
     };
     builtins_["push"] = [](VM& vm, std::vector<Value>& args) -> Value {
-        if (args.size() < 2) return Value::make_none();
-        if (args[0].type != Value::Vec) return Value::make_none();
+        if (args.size() != 2) throw std::runtime_error("bc::push expects (vector, value)");
+        if (args[0].type == Value::F64Array) {
+            throw std::runtime_error("bc::push cannot grow an f64_array (its size is fixed); create it with bc::f64_array(n) or use a vector");
+        }
+        if (args[0].type != Value::Vec) {
+            throw std::runtime_error("bc::push expects a vector as its first argument (got " + args[0].type_name() + ")");
+        }
         args[0].vec_val->push_back(args[1]);
         return Value::make_none();
     };
@@ -242,17 +250,7 @@ static double numeric_of(const Value& v) {
     return 0.0;
 }
 
-// Written by Claude
-// i give up :/
 
-// Elementwise binary op across tensors (nested Vec of any depth), with
-// scalar broadcasting on either side (`matrix - 1`, `2 * matrix`) and
-// one NumPy-style shape broadcast: a 2D tensor combined with a flat 1D
-// vector whose length matches each row's width broadcasts that vector
-// across every row. That one case covers the single most common shape
-// mismatch in real neural-net code - adding a bias vector to a batch of
-// pre-activations - without needing a separate add_bias function to
-// learn: `matmul(x, w) + b` just works.
 template <typename Op>
 static Value elementwise_op(const Value& a, const Value& b, const Op& op, int depth = 0) {
     if (depth > 256) {
@@ -262,12 +260,6 @@ static Value elementwise_op(const Value& a, const Value& b, const Op& op, int de
     if (av && bv) {
         bool a_is_2d = !a.vec_val->empty() && (*a.vec_val)[0].type == Value::Vec;
         bool b_is_2d = !b.vec_val->empty() && (*b.vec_val)[0].type == Value::Vec;
-        // Row-broadcast checked BEFORE the same-top-level-size case below:
-        // for a square matrix, row count and row width coincide, so a
-        // plain size comparison would wrongly treat a bias vector as
-        // "one scalar per row" instead of "this row added to every row".
-        // Requiring exactly one side to be 2D and the other flat (not
-        // just a length match) is what disambiguates the two.
         if (a_is_2d && !b_is_2d && (*a.vec_val)[0].vec_val->size() == b.vec_val->size()) {
             std::vector<Value> out;
             out.reserve(a.vec_val->size());
@@ -328,18 +320,12 @@ static Value f64_array_op(const Value& a, const Value& b, const Op& op) {
 }
 
 static Value add_values(const Value& a, const Value& b) {
-    // Fast path: plain int+int is the overwhelmingly common case in
-    // ordinary (non-tensor, non-string) code - check it first so tensor
-    // support costs nothing when it's not being used. Safe to hoist
-    // above everything else below since it can't overlap with any of
-    // them (Str/Vec/Float/Bool are all mutually exclusive with Int&&Int).
     if (a.type == Value::Int && b.type == Value::Int) {
         if ((b.int_val > 0 && a.int_val > std::numeric_limits<long long>::max() - b.int_val) ||
             (b.int_val < 0 && a.int_val < std::numeric_limits<long long>::min() - b.int_val))
             throw std::runtime_error("integer overflow in addition");
         return Value::make_int(a.int_val + b.int_val);
     }
-    // String concatenation
     if (a.type == Value::Str || b.type == Value::Str) {
         if (a.type == Value::Str && b.type == Value::Str) {
             std::string r;
@@ -353,12 +339,9 @@ static Value add_values(const Value& a, const Value& b) {
     if (a.type == Value::F64Array || b.type == Value::F64Array) {
         return f64_array_op(a, b, [](double x, double y){ return x + y; });
     }
-    // Tensors: elementwise (with broadcasting) - see elementwise_op.
-    // Covers `matrix + matrix`, `matrix + bias_row`, `matrix + scalar`.
     if (a.type == Value::Vec || b.type == Value::Vec) {
         return elementwise_op(a, b, [](double x, double y){ return x + y; });
     }
-    // Numeric
     if (a.type == Value::Float || b.type == Value::Float) {
         double av = (a.type == Value::Float) ? a.float_val : (a.type == Value::Int ? (double)a.int_val : 0.0);
         double bv = (b.type == Value::Float) ? b.float_val : (b.type == Value::Int ? (double)b.int_val : 0.0);
@@ -367,7 +350,6 @@ static Value add_values(const Value& a, const Value& b) {
     if (a.type == Value::Bool && b.type == Value::Bool) {
         return Value::make_int((a.bool_val?1:0) + (b.bool_val?1:0));
     }
-    // Fallback
     return Value::make_none();
 }
 
@@ -424,11 +406,6 @@ static Value mul_values(const Value& a, const Value& b) {
     if (a.type == Value::F64Array || b.type == Value::F64Array) {
         return f64_array_op(a, b, [](double x, double y){ return x * y; });
     }
-    // [0.0] * n  ->  n copies of the vector's contents, concatenated flat
-    // (same convention as Python's list repetition, and the same shape
-    // Str * Int already followed above). This stays reserved for a
-    // literal integer count specifically - Vec*Float and Vec*Vec below
-    // are elementwise multiply/scaling instead, a different operation.
     if (a.type == Value::Vec && b.type == Value::Int) {
         std::vector<Value> out;
         long long n = b.int_val;
@@ -455,7 +432,6 @@ static Value mul_values(const Value& a, const Value& b) {
         }
         return Value::make_vec(std::move(out));
     }
-    // Elementwise multiply / scalar scaling: `matrix * 0.5`, `a * b`.
     if (a.type == Value::Vec || b.type == Value::Vec) {
         return elementwise_op(a, b, [](double x, double y){ return x * y; });
     }
@@ -508,7 +484,6 @@ static Value mod_values(const Value& a, const Value& b) {
 
 static bool eq_values(const Value& a, const Value& b) {
     if (a.type != b.type) {
-        // Numeric coercion
         if ((a.type == Value::Int || a.type == Value::Float) &&
             (b.type == Value::Int || b.type == Value::Float)) {
             double av = (a.type == Value::Float) ? a.float_val : (double)a.int_val;
@@ -540,14 +515,10 @@ static bool lt_values(const Value& a, const Value& b) {
     return false;
 }
 
-// Fixed ABI for every native-JIT-compiled function, regardless of arity
-// - see native_jit.hpp/.cpp. All args and the return value cross this
-// boundary as double.
 bool VM::try_call_native(IRFunction& fn, const std::vector<Value>& args, Value& out) {
     if (fn.native_variants.empty()) return false;
     static const bool debug = std::getenv("CSY_JIT_DEBUG") != nullptr;
     if (args.size() > 16) return false;
-    // The signature of THIS call: what each argument actually is right now.
     uint32_t sig = 0;
     for (size_t i = 0; i < args.size(); i++) {
         uint32_t code;
@@ -605,14 +576,6 @@ bool VM::try_call_native(IRFunction& fn, const std::vector<Value>& args, Value& 
         if (a.type == Value::Int) packed[slot] = {0.0, a.int_val, nullptr, 0, 0};
         else packed[slot] = {a.float_val, 0, nullptr, 0, 0};
     }
-    // `__loop_*` functions are top-level loops the compiler moved into functions
-    // (see outline_top_level_loops). They are exact stand-ins for the loop, so the
-    // bytecode version must stay the authority on anything unusual:
-    //  * two array arguments that share memory could make the native run read what
-    //    it wrote, so such calls run in the VM;
-    //  * a native error is discarded and the loop re-runs in the VM from the same
-    //    inputs (the compiler only outlines loops where that is always safe), which
-    //    reproduces the interpreter's own error and the state it leaves behind.
     const bool outlined_loop = fn.name.compare(0, 7, "__loop_") == 0;
     if (outlined_loop) {
         for (size_t i = 0; i < args.size(); i++) {
@@ -634,8 +597,6 @@ bool VM::try_call_native(IRFunction& fn, const std::vector<Value>& args, Value& 
     NativeRet ret;
     ret.i = 0;
     variant->entry(packed, &error_code, &return_tag, &ret);
-    // Error 5: an int argument was too large to hold exactly in a double. It is raised in the native
-    // entry before anything has run, so running the bytecode version instead is always safe.
     if (error_code == 5) {
         if (debug) fprintf(stderr, "[csy][jit-debug] '%s' int argument beyond 2^53 for a float parameter; using VM\n", fn.name.c_str());
         return false;
@@ -655,12 +616,11 @@ bool VM::try_call_native(IRFunction& fn, const std::vector<Value>& args, Value& 
     if (error_code == 4) throw std::runtime_error("integer overflow in native numeric operation");
     if (!variant->ret_float) out = Value::make_int(ret.i);
     else if (return_tag == 1) out = Value::make_float(ret.f);
-    else out = Value::make_int(static_cast<long long>(ret.f));  // this path returned an int
+    else out = Value::make_int(static_cast<long long>(ret.f));
     return true;
 }
 
 
-// ---- fast paths shared by the fused opcodes (mirror the ones in the main switch) ----
 static inline bool fast_arith(Op op, const Value& a, const Value& b, Value& out) {
     if (a.type == Value::Int && b.type == Value::Int) {
         const long long x = a.int_val, y = b.int_val;
@@ -741,11 +701,6 @@ static bool compare_slow(Op op, const Value& a, const Value& b) {
     }
 }
 
-// Builds the in-memory execution form of every function: a copy of the bytecode in
-// which the first slot of each recognised run of opcodes is replaced by a fused
-// opcode. The following slots keep their original opcodes, so a jump that lands in
-// the middle of a run still executes correctly, and a fused op that cannot use its
-// fast path just runs the original sequence.
 static std::vector<long long> quicken(IRModule& mod, size_t real_globals) {
     std::vector<long long> consts;
     std::unordered_map<long long, int> const_slot;
@@ -757,7 +712,6 @@ static std::vector<long long> quicken(IRModule& mod, size_t real_globals) {
             QInstr& q = fn.qcode[i];
             q.op = in.op; q.arg = in.arg;
         }
-        // Operand descriptor of a LOAD_LOCAL / LOAD_GLOBAL / small PUSH_INT at slot k.
         auto operand = [&](size_t k, uint8_t& kind, int& value, bool allow_imm) {
             if (k >= n) return false;
             const Instr& in = fn.code[k];
@@ -792,7 +746,7 @@ static std::vector<long long> quicken(IRModule& mod, size_t real_globals) {
             const Op third = fn.code[i + 2].op;
             QInstr& q = fn.qcode[i];
             if (third == Op::GET_INDEX) {
-                if (in_is_const(fn.code[i])) continue;   // indexing a literal int is an error path: leave it to the original code
+                if (in_is_const(fn.code[i])) continue;
                 q.op = Op::Q_GETIDX; q.ak = ak; q.arg = av; q.bk = bk; q.b = bv;
                 continue;
             }
@@ -821,14 +775,6 @@ Value VM::exec_function_stack(IRFunction& fn, size_t nargs, Rc<std::vector<Value
 
 Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t stack_nargs,
                              Rc<std::vector<Value>> upvalues) {
-    // Every CSy function call recurses natively into this same C++ function
-    // (there's no separate, heap-managed CSy call stack), so unbounded
-    // recursion in a CSy program eventually overflows the real C++ stack -
-    // measured to actually segfault somewhere between 5,000 and 10,000
-    // levels deep. This guard throws a clean, friendly error well below
-    // that point instead, the same strategy interpreters generally use
-    // (Python's RecursionError, JS's "Maximum call stack size exceeded")
-    // rather than letting the process crash.
     struct DepthGuard {
         int& depth;
         explicit DepthGuard(int& d) : depth(d) { depth++; }
@@ -848,12 +794,8 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
         for (size_t i = 0; i < args->size() && i < fn.param_names.size(); i++) {
             frame.locals[i] = std::move((*args)[i]);
         }
-        // `args` came from the same pool (see Op::CALL) - hand it straight
-        // back rather than letting it fall out of scope and free its buffer.
         release_locals(std::move(*args));
     } else {
-        // Arguments are still on the operand stack, last one on top: move them straight into the
-        // parameters (extra arguments are dropped, exactly as the vector path does).
         const size_t params = fn.param_names.size();
         for (size_t i = stack_nargs; i-- > 0;) {
             if (i < params) frame.locals[i] = std::move(stack_.back());
@@ -865,22 +807,14 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
     frame.upvalues = std::move(upvalues);
     frames_.push_back(std::move(frame));
 
-    // Safe to hold onto this for the rest of the call: frames_ is reserved
-    // (see kMaxCallDepth) to more than the max depth we'll ever let the
-    // guard above reach, so nothing pushed by a nested call further down
-    // can ever trigger a reallocation that would invalidate it. Likewise
-    // `fn`'s own bytecode never changes size once compiled.
     Frame& f = frames_.back();
     const QInstr* const code = f.fn->qcode.data();
     const size_t code_size = f.fn->qcode.size();
     size_t ip = 0;
-    Value* const locals = f.locals.data();     // never resized while the frame lives
-    Value* const globals = globals_.data();    // sized once in run()
+    Value* const locals = f.locals.data();
+    Value* const globals = globals_.data();
 
     Value return_value = Value::make_none();
-    // See the catch block below: a `try` block caught here resumes by
-    // looping back around instead of unwinding, so the dispatch loop
-    // itself sits inside an outer retry loop.
     for (;;) {
     try {
         while (ip < code_size) {
@@ -931,7 +865,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     stack_.pop_back();
                     break;
                 case Op::LOAD_LOCAL_BOXED: {
-                    // The slot holds a box (1-element Vec) - see MAKE_CLOSURE.
                     Value& box = f.locals[ins.arg];
                     if (box.type != Value::Vec || !box.vec_val || box.vec_val->empty()) {
                         throw std::runtime_error("invalid boxed local access");
@@ -956,7 +889,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     stack_.pop_back();
                     break;
                 case Op::LOAD_UPVALUE: {
-                    // Upvalues are always boxes - auto-unwrap.
                     if (!f.upvalues || ins.arg < 0 || ins.arg >= (int)f.upvalues->size()) {
                         throw std::runtime_error("invalid upvalue access");
                     }
@@ -980,9 +912,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     break;
                 }
                 case Op::LOAD_UPVALUE_BOX: {
-                    // Raw box, no unwrap - relaying an already-captured
-                    // variable further down to a grandchild closure so it
-                    // shares the exact same cell.
                     if (!f.upvalues || ins.arg < 0 || ins.arg >= (int)f.upvalues->size()) {
                         throw std::runtime_error("invalid upvalue access");
                     }
@@ -1042,7 +971,13 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                 case Op::VEC_PUSH: {
                     Value x = std::move(stack_.back()); stack_.pop_back();
                     Value& v = stack_.back();
-                    if (v.type == Value::Vec) v.vec_val->push_back(std::move(x));
+                    if (v.type == Value::F64Array) {
+                        throw std::runtime_error("bc::push cannot grow an f64_array (its size is fixed); create it with bc::f64_array(n) or use a vector");
+                    }
+                    if (v.type != Value::Vec) {
+                        throw std::runtime_error("bc::push expects a vector as its first argument (got " + v.type_name() + ")");
+                    }
+                    v.vec_val->push_back(std::move(x));
                     v = Value::make_none();
                     break;
                 }
@@ -1052,10 +987,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                 }
                 case Op::ADD: case Op::SUB: case Op::MUL: case Op::DIV: case Op::MOD: {
                     {
-                        // Fast paths: plain int/int and float arithmetic updates the
-                        // left operand in place with no temporaries. Anything unusual
-                        // (overflow, zero divisor, strings, tensors) falls through to
-                        // the generic code below, which owns all error reporting.
                         const size_t n = stack_.size();
                         Value& rb = stack_[n - 1];
                         Value& ra = stack_[n - 2];
@@ -1074,8 +1005,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                             if (ok) { ra.int_val = r; stack_.pop_back(); break; }
                         } else if (ins.op == Op::ADD && ra.type == Value::Str && rb.type == Value::Str &&
                                    ra.str_val.unique()) {
-                            // The left string is a temporary nobody else can see (e.g. the result of
-                            // the previous `+` in `a + b + c`): extend it instead of copying it.
                             ra.str_val->append(*rb.str_val);
                             stack_.pop_back();
                             break;
@@ -1211,7 +1140,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     break;
                 }
                 case Op::MAKE_DICT: {
-                    int n = ins.arg;  // number of key/value pairs
+                    int n = ins.arg;
                     std::unordered_map<std::string, Value> m;
                     m.reserve(n);
                     std::vector<std::pair<Value, Value>> pairs;
@@ -1280,7 +1209,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                         }
                         long long i = idx.int_val;
                         long long len = (long long)obj.str_val->size();
-                        if (i < 0) i += len;  // negative indices count from the end
+                        if (i < 0) i += len;
                         if (i < 0 || i >= len) {
                             throw std::runtime_error("string index out of bounds");
                         }
@@ -1308,7 +1237,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     }
                     long long i = idx.int_val;
                     long long len = (long long)obj.vec_val->size();
-                    if (i < 0) i += len;  // negative indices count from the end
+                    if (i < 0) i += len;
                     if (i < 0 || i >= len) {
                         std::stringstream ss;
                         ss << "vector index " << idx.int_val << " out of bounds (size "
@@ -1383,7 +1312,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     }
                     long long i = idx.int_val;
                     long long len = (long long)obj.vec_val->size();
-                    if (i < 0) i += len;  // negative indices count from the end
+                    if (i < 0) i += len;
                     if (i < 0 || i >= len) {
                         std::stringstream ss;
                         ss << "vector index " << idx.int_val << " out of bounds (size "
@@ -1394,10 +1323,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     break;
                 }
                 case Op::OUTPUT: {
-                    // Stack: [..., sink, value]  (value pushed last, on top -
-                    // sink is established first by codegen, whether that's a
-                    // plain PUSH_SINK or an earlier link in a chained
-                    // `o>a>b>c` finishing and leaving its sink behind).
                     Value val = std::move(stack_.back()); stack_.pop_back();
                     Value sink = std::move(stack_.back()); stack_.pop_back();
                     if (sink.type != Value::Sink) {
@@ -1405,22 +1330,11 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     }
                     if (sink.int_val == Value::SINK_OUT) {
                         std::cout << val.to_display();
-                        // arg != 0 marks the outermost link in a chain (or
-                        // the only link, for a plain non-chained `o>x;`) -
-                        // only that one gets a trailing newline, so chained
-                        // output lands on a single line, the same as
-                        // chained ostream `<<`.
                         if (ins.arg != 0) std::cout << "\n";
-                        // Interactive terminals see each line at once; pipes and
-                        // files get block buffering (one write per line was the
-                        // dominant cost of output-heavy programs).
                         if (stdout_tty_) std::cout.flush();
                     } else {
                         throw std::runtime_error("unknown output sink");
                     }
-                    // Leave the sink behind: a further `>` can chain off of
-                    // it, and if this was the whole statement, the ExprStmt
-                    // POP below discards it, same as any other expression.
                     stack_.push_back(sink);
                     break;
                 }
@@ -1434,26 +1348,19 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     break;
                 }
                 case Op::JMPR: {
-                    if (stack_.back().is_truthy()) ip = (size_t)ins.arg;  // peek
+                    if (stack_.back().is_truthy()) ip = (size_t)ins.arg;
                     else stack_.pop_back();
                     break;
                 }
                 case Op::CALL: {
                     int nargs = ins.arg;
-                    // The callee is pushed last (above the args).
                     Value callee = std::move(stack_.back()); stack_.pop_back();
                     if (callee.type == Value::Func && callee.func_val && !callee.func_val->is_native &&
                         mod_->functions[callee.func_val->func_index].native_variants.empty()) {
-                        // Interpreted function with no native variants to consult: no argument vector needed.
                         Value ret = exec_function_stack(mod_->functions[callee.func_val->func_index],
                                                         (size_t)nargs, callee.func_val->upvalues);
                         stack_.push_back(std::move(ret));
                     } else if (callee.type == Value::Func && callee.func_val) {
-                        // Reuse the same pool exec_function's own locals draw
-                        // from, instead of a fresh heap allocation on every
-                        // single call - it's released back below (native
-                        // path) or inside exec_function itself once it's
-                        // done moving these into its frame's locals.
                         std::vector<Value> args = acquire_locals((size_t)nargs);
                         for (int i = nargs - 1; i >= 0; i--) {
                             args[i] = std::move(stack_.back()); stack_.pop_back();
@@ -1480,7 +1387,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     break;
                 }
                 case Op::CALL_NATIVE: {
-                    // Packed: arg = builtin_idx * 1000 + nargs
                     int builtin_idx = ins.arg / 1000;
                     int nargs = ins.arg % 1000;
                     std::vector<Value> args = acquire_locals((size_t)nargs);
@@ -1492,7 +1398,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                         const std::string& bname = mod_->builtin_names[builtin_idx];
                         auto found = builtins_.find(bname);
                         if (found == builtins_.end()) throw std::runtime_error("unknown builtin '" + bname + "'");
-                        native = &found->second;  // unordered_map nodes are address-stable
+                        native = &found->second;
                         native_cache_[builtin_idx] = native;
                     }
                     Value ret = (*native)(*this, args);
@@ -1506,13 +1412,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     return return_value;
                 }
 
-                // ---------------- superinstructions (see ir.hpp / quicken()) ----------------
-                // Every fused op either completes the whole run of original opcodes it
-                // stands for, or falls back by performing only the FIRST original opcode
-                // (pushing operand A) and letting the untouched originals that follow run.
                 case Op::Q_BIN: case Op::Q_BIN_STORE: case Op::Q_BIN_JMPF: {
-                    // Operand kind 0 = local slot, 1 = global slot (integer immediates live in
-                    // hidden constant slots after the real globals, see quicken()).
                     const Value* const bases[2] = {locals, globals};
                     const Value* const pa = bases[ins.ak] + ins.arg;
                     const Value* const pb = bases[ins.bk] + ins.b;
@@ -1529,7 +1429,6 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                             if (ins.op == Op::Q_BIN_STORE) {
                                 Value& dest = (ins.sub & 0x40) ? globals[ins.t] : locals[ins.t];
                                 if (&dest == pa && dest.str_val.unique()) {
-                                    // `s = s + x` / `s += x` with a string nobody else holds: append in place.
                                     dest.str_val->append(*pb->str_val);
                                     ip += 3;
                                     break;
@@ -1560,7 +1459,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                             break;
                         }
                     }
-                    stack_.push_back(*pa);   // fall back: do only the first original opcode
+                    stack_.push_back(*pa);
                     break;
                 }
                 case Op::Q_CMP_JMPF: {
@@ -1574,7 +1473,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                     Value b = std::move(stack_.back()); stack_.pop_back();
                     Value a = std::move(stack_.back()); stack_.pop_back();
                     stack_.push_back(Value::make_bool(compare_slow((Op)ins.sub, a, b)));
-                    break;   // the original JMPF runs next
+                    break;
                 }
                 case Op::Q_GETIDX: {
                     const Value* const bases[2] = {locals, globals};
@@ -1595,7 +1494,7 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
                             if (i >= 0 && i < len) { stack_.push_back(Value::make_float(arr[(size_t)i])); ip += 2; break; }
                         }
                     }
-                    stack_.push_back(*po);   // fall back to the original LOAD / LOAD / GET_INDEX
+                    stack_.push_back(*po);
                     break;
                 }
                 case Op::HALT:
@@ -1607,36 +1506,20 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
             }
         }
     } catch (const std::exception& e) {
-        // (std::exception, not just runtime_error: allocation failures and library
-        // errors raised inside builtins become ordinary, catchable CSy errors.)
         const bool out_of_memory = dynamic_cast<const std::bad_alloc*>(&e) != nullptr;
-        // Pop any frames belonging to deeper (already-unwound-past) calls -
-        // in practice a no-op by the time we get here, since each of those
-        // calls' own exec_function invocation already popped its single
-        // frame in this same catch block before rethrowing. Left in as a
-        // safety net.
         while (!frames_.empty() && frames_.back().fn != &fn) pop_current_frame();
         if (frames_.empty()) throw;
 
-        // Does a `try` block belonging to exactly THIS frame want it?
-        // frame_depth was recorded as frames_.size() when TRY_ENTER ran,
-        // which is only still equal to frames_.size() now if every frame
-        // pushed after it (i.e. every deeper call the try body made) has
-        // already been popped - which is exactly the unwinding-completed
-        // state we're in once we reach here.
         const bool handled_here = !try_handlers_.empty() && try_handlers_.back().frame_depth == frames_.size();
         if (handled_here) {
             error_context_.clear();
         } else if (error_context_.empty()) {
-            // First frame the error unwinds through: remember where it happened.
             std::string where;
-            // `__loop_*` functions are module-level loops the compiler moved into functions; to the user
-            // they are still top-level code.
             if (fn.name == "<main>" || fn.name.compare(0, 7, "__loop_") == 0) {
                 where = " (at top level";
             } else {
                 std::string name = fn.name;
-                if (name.compare(0, 7, "__csy_u") == 0) {      // project builds mangle top-level names
+                if (name.compare(0, 7, "__csy_u") == 0) {
                     const size_t us = name.find('_', 7);
                     if (us != std::string::npos && us + 1 < name.size()) name = name.substr(us + 1);
                 }
@@ -1644,6 +1527,8 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
             }
             if (ip > 0 && ip - 1 < fn.code.size() && fn.code[ip - 1].line > 0) where += ", line " + std::to_string(fn.code[ip - 1].line);
             error_context_ = where + ")";
+            error_line_ = 0;
+            if (fn.name.compare(0, 7, "__csy_u") != 0 && ip > 0 && ip - 1 < fn.code.size()) error_line_ = fn.code[ip - 1].line;
         }
         if (handled_here) {
             TryHandler h = try_handlers_.back();
@@ -1651,14 +1536,14 @@ Value VM::exec_function_impl(IRFunction& fn, std::vector<Value>* args, size_t st
             stack_.resize(h.stack_depth);
             stack_.push_back(Value::make_str(out_of_memory ? "out of memory" : e.what()));
             ip = (size_t)h.catch_ip;
-            continue;  // resume dispatch in the catch block, same frame
+            continue;
         }
 
         pop_current_frame();
         throw;
     }
-    break;  // while-loop ran off the end of the function without RET/HALT
-    }  // for (;;)
+    break;
+    }
 
     pop_current_frame();
     return return_value;
@@ -1668,7 +1553,6 @@ VMResult VM::run(IRModule& mod) {
     VMResult result;
     mod_ = &mod;
     const std::vector<long long> hidden_consts = quicken(mod, mod.global_names.size());
-    // Initialize globals to none; hidden constant slots (operands of fused opcodes) follow them.
     globals_.assign(mod.global_names.size(), Value::make_none());
     for (long long c : hidden_consts) globals_.push_back(Value::make_int(c));
     user_func_cache_.assign(mod.functions.size(), Rc<Function>());
@@ -1686,11 +1570,13 @@ VMResult VM::run(IRModule& mod) {
             "runtime error: out of memory (the program asked for more memory than is available)");
     } catch (const std::exception& e) {
         result.ok = false;
-        result.diags.error(mod.file, 0, 0, std::string("runtime error: ") + e.what() + error_context_);
+        result.diags.error(mod.file, error_line_ > 0 ? error_line_ : 0, 0, std::string("runtime error: ") + e.what() + error_context_);
         error_context_.clear();
+        error_line_ = 0;
     }
-    std::cout.flush();  // keep stdout ordered before any diagnostics the caller prints
+    std::cout.flush();
     return result;
 }
 
-} // namespace csy
+}
+

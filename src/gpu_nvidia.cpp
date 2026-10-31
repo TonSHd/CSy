@@ -1,5 +1,3 @@
-// NVIDIA GPU support for CSy, wired in dynamically, at runtime.
-// This file was written by Claude, CSy maintainer.
 
 #include "gpu_nvidia.hpp"
 #include "value.hpp"
@@ -33,7 +31,6 @@ typedef int (*fn_cublasSgemm)(void*, int, int, int, int, int,
                                const float*, float*, int);
 }
 
-// Stable public ABI constants (unchanged since CUDA 1.0 / cuBLAS 1.0).
 static const int CSY_cudaMemcpyHostToDevice = 1;
 static const int CSY_cudaMemcpyDeviceToHost = 2;
 static const int CSY_cudaSuccess = 0;
@@ -174,7 +171,6 @@ static CudaBinding& binding() {
     b.attempted = true;
     bool debug = std::getenv("CSY_CUDA_DEBUG") != nullptr;
 
-    // library search path.
     if (try_dlopen_pair("libcudart.so.12", "libcublas.so.12", b, debug)) return b;
 
     std::string root = find_repo_root(debug);
@@ -523,11 +519,8 @@ void register_nvidia_builtins(VM& vm) {
                     }
                     return Value::make_vec(std::move(result));
                 }
-                // GPU path failed for any reason - fall through to CPU.
             }
         }
-        // CPU fallback: always available, always correct, the exact same
-        // implementation bc::matmul uses.
         auto it = vm2.builtins_table().find("matmul");
         if (it != vm2.builtins_table().end()) {
             return it->second(vm2, args);
@@ -537,3 +530,4 @@ void register_nvidia_builtins(VM& vm) {
 }
 
 }
+

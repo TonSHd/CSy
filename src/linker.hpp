@@ -9,3 +9,4 @@ bool namespace_project_symbols(std::vector<SourceUnit>& units, std::string& erro
 
 std::vector<std::string> top_level_names(const Module& module, bool include_private = false);
 }
+

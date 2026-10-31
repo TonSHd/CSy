@@ -32,8 +32,10 @@ SOURCES := \
 	$(CSY_DIR)/value.cpp \
 	$(CSY_DIR)/builtins_ext.cpp \
 	$(CSY_DIR)/compress.cpp \
+	$(CSY_DIR)/zstd.cpp \
 	$(CSY_DIR)/json.cpp \
 	$(CSY_DIR)/parquet.cpp \
+	$(CSY_DIR)/csv.cpp \
 	$(CSY_DIR)/dataset.cpp \
 	$(CSY_DIR)/ai_ops.cpp \
 	$(CSY_DIR)/pi.cpp \
@@ -63,7 +65,6 @@ MANDIR := $(DESTDIR)$(PREFIX)/share/man/man1
 DOCDIR := $(DESTDIR)$(PREFIX)/share/doc/csyc
 DATADIR := $(DESTDIR)$(PREFIX)/share/csyc
 
-# make install [PREFIX=/usr] [DESTDIR=staging]   (ccm_table.bin goes to PREFIX/share/csyc, where csyc init finds it)
 install: csyc
 	install -d $(BINDIR) $(MANDIR) $(DATADIR) $(DOCDIR)/ccm
 	install -s -m 0755 csyc $(BINDIR)/csyc

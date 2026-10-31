@@ -18,3 +18,4 @@ TableCopy copy_default_table(const std::string& folder, std::string& detail);
 
 }
 }
+

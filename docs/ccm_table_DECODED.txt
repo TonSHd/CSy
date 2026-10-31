@@ -1,0 +1,2324 @@
+[GROUP 000] raw=(722, 20, 0, 25)
+  0000: {name} got {count} arguments at line {line} in {file}
+  0001: Wrong argument count for {name} in {file}
+  0002: {file} called {name} with {count} args
+  0003: Argument mismatch on {name} line {line}
+  0004: {name} does not take {count} arguments
+  0005: Call to {name} has the wrong count
+  0006: Bad arity for {name}
+  0007: {name} argument count wrong
+  0008: {count} args given to {name}
+  0009: {file} has wrong call to {name}
+  0010: Argument number mismatch
+  0011: {name} expects different count
+  0012: Wrong number of params for {name}
+  0013: {file} line {line} bad call
+  0014: {name} called incorrectly
+  0015: Arity error on {name}
+  0016: {count} is wrong for {name}
+  0017: Call arguments do not match
+  0018: {name} parameter count off
+  0019: Bad call site for {name}
+  0020: {file} mismatched {name}
+  0021: Argument count error
+  0022: {name} got unexpected count
+  0023: Wrong args to {name}
+  0024: Call arity problem
+
+[GROUP 001] raw=(1120, 20, 25, 25)
+  0025: Already off
+  0026: It was already disabled
+  0027: No need to disable again
+  0028: Still off
+  0029: Already in quiet mode
+  0030: You already turned it off
+  0031: Already inactive
+  0032: It is already disabled
+  0033: No change needed
+  0034: Still quiet
+  0035: Already off
+  0036: Redundant disable
+  0037: Already quiet
+  0038: Was already off
+  0039: No action taken
+  0040: Already disabled
+  0041: Still inactive
+  0042: Already there
+  0043: Off already
+  0044: No need
+  0045: Already quiet
+  0046: Disabled previously
+  0047: Still normal
+  0048: Already set
+  0049: Off as before
+
+[GROUP 002] raw=(1544, 19, 50, 25)
+  0050: Already on you know
+  0051: It was already enabled
+  0052: No need to enable twice
+  0053: Still on same as before
+  0054: Already running in cooler mode
+  0055: You already turned it on
+  0056: Already active
+  0057: It is already enabled
+  0058: No change needed
+  0059: Still on
+  0060: Already in cooler mode
+  0061: Redundant enable
+  0062: Already live
+  0063: Was already on
+  0064: No action taken
+  0065: Already enabled
+  0066: Still active
+  0067: Already there
+  0068: On already
+  0069: No need
+  0070: Already running
+  0071: Enabled previously
+  0072: Still cooler
+  0073: Already set
+  0074: On as before
+
+[GROUP 003] raw=(1975, 13, 75, 25)
+  0075: Cancelled nothing changed
+  0076: Ok keeping everything
+  0077: You said no so stopped
+  0078: Action cancelled
+  0079: Nothing was deleted
+  0080: Backing out as requested
+  0081: Cancelled by you
+  0082: No action taken
+  0083: Kept as is
+  0084: Stopped the operation
+  0085: You declined
+  0086: Nothing modified
+  0087: Cancel confirmed
+  0088: Aborted the change
+  0089: Left everything alone
+  0090: No wipe or prune
+  0091: Cancelled safely
+  0092: You chose no
+  0093: Operation stopped
+  0094: No changes made
+  0095: Backed out
+  0096: Declined and safe
+  0097: Nothing touched
+  0098: Cancel done
+  0099: Safe cancel
+
+[GROUP 004] raw=(2384, 12, 100, 25)
+  0100: Cooler Compiler is now off
+  0101: Alright switched off
+  0102: CCM disabled
+  0103: Back to quiet mode
+  0104: Disabled as requested
+  0105: Off for now
+  0106: Now offline
+  0107: Cooler is off
+  0108: Deactivated
+  0109: Quiet mode on
+  0110: Disabled successfully
+  0111: Cooler Compiler inactive
+  0112: You flipped it off
+  0113: Back to normal
+  0114: Off and quiet
+  0115: Switched off
+  0116: CCM is down
+  0117: Cooler offline
+  0118: Disabled for you
+  0119: Now inactive
+  0120: Cooler mode disengaged
+  0121: Off as requested
+  0122: Deactivated and gone
+  0123: Cooler is disabled
+  0124: Quiet now
+
+[GROUP 005] raw=(2786, 11, 125, 25)
+  0125: Cooler Compiler is now on
+  0126: Alright it is enabled
+  0127: CCM switched on
+  0128: You turned me on
+  0129: Cooler mode active
+  0130: Enabled and ready
+  0131: Now online
+  0132: Cooler is live
+  0133: Activated
+  0134: On and listening
+  0135: Enabled successfully
+  0136: Cooler Compiler active
+  0137: You flipped it on
+  0138: Now in cooler mode
+  0139: Ready and enabled
+  0140: Switched on
+  0141: CCM is up
+  0142: Cooler online
+  0143: Enabled for you
+  0144: Now active
+  0145: Cooler mode engaged
+  0146: On as requested
+  0147: Activated and here
+  0148: Cooler is enabled
+  0149: Live now
+
+[GROUP 006] raw=(3185, 16, 150, 25)
+  0150: Memory is already empty
+  0151: Nothing in there to touch
+  0152: Already wiped clean
+  0153: Empty memory nothing to do
+  0154: No records present
+  0155: Memory was already clear
+  0156: Already empty
+  0157: Nothing to wipe
+  0158: Memory blank
+  0159: No content
+  0160: Already clear
+  0161: Empty as can be
+  0162: Nothing stored
+  0163: Memory vacant
+  0164: No records exist
+  0165: Already gone
+  0166: Blank already
+  0167: Nothing present
+  0168: Empty state
+  0169: No data in memory
+  0170: Already wiped
+  0171: Vacant memory
+  0172: Nothing there
+  0173: Clear already
+  0174: Empty memory
+
+[GROUP 007] raw=(3673, 20, 175, 25)
+  0175: Nothing to prune already at {count}
+  0176: Already down to {count} or less
+  0177: No extra records to remove
+  0178: Memory is already lean
+  0179: Nothing extra beyond {count}
+  0180: Prune not needed
+  0181: Already at target
+  0182: No pruning required
+  0183: Memory already small
+  0184: {count} is already the size
+  0185: Nothing excess
+  0186: Already trimmed
+  0187: No work to do
+  0188: Memory at or under {count}
+  0189: Prune skipped
+  0190: Already good
+  0191: No records to drop
+  0192: Target already met
+  0193: Nothing surplus
+  0194: Already clean
+  0195: No prune action
+  0196: Memory fine as is
+  0197: Already at {count}
+  0198: Nothing to cut
+  0199: Skip prune
+
+[GROUP 008] raw=(4206, 10, 200, 25)
+  0200: Pruned down to {count} records
+  0201: Memory cleaned kept {count}
+  0202: Prune done {count} left
+  0203: Trimmed to {count} records
+  0204: Kept the last {count}
+  0205: Prune finished with {count} remaining
+  0206: Now at {count} records
+  0207: Cleaned to {count}
+  0208: {count} records remain
+  0209: Pruned successfully
+  0210: Memory now {count}
+  0211: Kept {count}
+  0212: Trim complete
+  0213: {count} left after prune
+  0214: Records reduced to {count}
+  0215: Prune to {count} done
+  0216: Memory trimmed
+  0217: {count} records kept
+  0218: Cleanup finished
+  0219: Now holding {count}
+  0220: Pruned to size
+  0221: {count} surviving records
+  0222: Memory reduced
+  0223: Kept recent {count}
+  0224: Prune success
+
+[GROUP 009] raw=(4557, 9, 225, 25)
+  0225: Memory wiped clean
+  0226: Everything gone
+  0227: Full wipe done
+  0228: Memory is empty now
+  0229: All records deleted
+  0230: Wiped as requested
+  0231: Clean slate
+  0232: Memory cleared
+  0233: Nothing left
+  0234: Full reset done
+  0235: All gone
+  0236: Wipe complete
+  0237: Memory empty
+  0238: Records erased
+  0239: Clean memory
+  0240: Everything removed
+  0241: Wipe successful
+  0242: Blank memory
+  0243: All cleared
+  0244: Reset finished
+  0245: Memory zeroed
+  0246: Nothing remains
+  0247: Full wipe
+  0248: Cleaned out
+  0249: Empty now
+
+[GROUP 010] raw=(5273, 11, 250, 25)
+  0250: Check failed at line {line} in {file}
+  0251: Something wrong in {file} around {line}:{col}
+  0252: {file} has a checking issue on line {line}
+  0253: Semantic problem at {line}:{col} in {file}
+  0254: Check trip at line {line} of {file}
+  0255: {file} did not pass checking cleanly
+  0256: Checking error in {file}
+  0257: Semantic error at line {line}
+  0258: {file} failed a check
+  0259: Problem found during check
+  0260: {file} has a semantic issue
+  0261: Check rejected that part
+  0262: Error during checking of {file}
+  0263: {file} line {line} check fail
+  0264: Semantic fault in {file}
+  0265: Checking did not like that
+  0266: {file} has an issue at {line}
+  0267: Failed semantic check
+  0268: Problem at {line}:{col}
+  0269: {file} did not check out
+  0270: Checking error found
+  0271: {file} has a deep issue
+  0272: Semantic problem detected
+  0273: Check failed on {file}
+  0274: Issue in program check
+
+[GROUP 011] raw=(5879, 20, 275, 25)
+  0275: Bad value for option {name}
+  0276: {name} got an invalid value
+  0277: Option {name} value is wrong
+  0278: Cannot parse value for {name}
+  0279: {name} expects a proper value
+  0280: Invalid argument to {name}
+  0281: Bad {name} value
+  0282: {name} value incorrect
+  0283: Invalid setting for {name}
+  0284: {name} has bad argument
+  0285: Value error on {name}
+  0286: Cannot use that with {name}
+  0287: {name} value not accepted
+  0288: Bad parameter for {name}
+  0289: {name} expects better value
+  0290: Invalid {name} input
+  0291: Value for {name} is off
+  0292: {name} argument bad
+  0293: Cannot process {name} value
+  0294: Wrong value type for {name}
+  0295: {name} value problem
+  0296: Bad input to {name}
+  0297: {name} rejected the value
+  0298: Invalid option value
+  0299: {name} value fails
+
+[GROUP 012] raw=(6458, 16, 300, 25)
+  0300: {name} needs a file and none was given
+  0301: Missing file for command {name}
+  0302: No file provided to {name}
+  0303: {name} requires a file argument
+  0304: File missing for {name}
+  0305: Give {name} a file next time
+  0306: No file for {name}
+  0307: {name} expects a file
+  0308: File argument missing
+  0309: {name} without file
+  0310: Need a file for {name}
+  0311: Missing input file
+  0312: {name} file required
+  0313: No source given to {name}
+  0314: File not supplied
+  0315: {name} needs input
+  0316: Absent file argument
+  0317: {name} incomplete without file
+  0318: Provide a file for {name}
+  0319: File required by {name}
+  0320: No file argument
+  0321: {name} missing its file
+  0322: Input file absent
+  0323: {name} has no file
+  0324: File needed
+
+[GROUP 013] raw=(6999, 19, 325, 25)
+  0325: Unknown command or option {name}
+  0326: Do not know what {name} is
+  0327: {name} is not a valid option
+  0328: Unrecognized {name}
+  0329: No such command {name}
+  0330: {name} is not something I understand
+  0331: Unknown {name}
+  0332: {name} not recognized
+  0333: Invalid option {name}
+  0334: No command named {name}
+  0335: {name} is unknown
+  0336: Unrecognized flag or command
+  0337: {name} does not exist
+  0338: Bad command {name}
+  0339: Unknown input {name}
+  0340: {name} not supported
+  0341: Invalid {name}
+  0342: No such option
+  0343: {name} is not valid
+  0344: Unknown argument {name}
+  0345: Command not found {name}
+  0346: {name} unknown
+  0347: Not a known option
+  0348: {name} invalid
+  0349: Unrecognized {name}
+
+[GROUP 014] raw=(7886, 15, 350, 26)
+  0350: Hell yeah {file} came out clean in {time}
+  0351: Look at that {file} actually behaved
+  0352: Clean win on {file} no drama
+  0353: {file} just vibed its way through in {time}
+  0354: Proud of this one {file} size {size}
+  0355: Alright {file} is looking sharp
+  0356: Nice one {file} you did not even fight me
+  0357: {file} compiled clean somehow
+  0358: Solid work on {file} took {time}
+  0359: {file} is good to go and I am lowkey happy
+  0360: That is a proper clean compile on {file}
+  0361: {file} did not try any nonsense
+  0362: Smooth as butter {file} in {time}
+  0363: {file} is solid and I will admit it
+  0364: Easy win for {file} size {size}
+  0365: {file} just works
+  0366: Clean and quiet on {file}
+  0367: {file} behaved and I am not even mad
+  0368: Perfect little compile on {file}
+  0369: {file} came through clean in {time}
+  0370: Another clean one for {file}
+  0371: {file} is good size {size}
+  0372: You got a real clean one on {file}
+  0373: {file} did not even try to mess with me
+  0374: That compile on {file} felt good
+  0375: gg fricking easy! (compile success)
+
+[GROUP 015] raw=(9083, 24, 376, 25)
+  0376: {file} compiled but those {count} warnings are still staring at you
+  0377: It works if you ignore the {count} little problems
+  0378: Success with {count} warnings on {file}
+  0379: {file} made it through with {count} warnings still alive
+  0380: Yeah it compiled but those {count} warnings did not vanish
+  0381: {count} warnings and a success on {file}
+  0382: It runs but {count} warnings came along for the ride
+  0383: {file} is usable with {count} warnings attached
+  0384: Success plus {count} warnings on {file}
+  0385: {file} compiled with {count} reminders hanging around
+  0386: Those {count} warnings did not stop {file}
+  0387: {file} works and still has {count} warnings watching
+  0388: {count} warnings survived the compile of {file}
+  0389: {file} is done but not quiet {count} warnings left
+  0390: You got the binary and {count} warnings
+  0391: {file} succeeded with {count} side notes
+  0392: Warnings {count} still present on {file}
+  0393: {file} is good enough with {count} warnings
+  0394: {count} warnings tag along with {file}
+  0395: Success on {file} despite {count} warnings
+  0396: {file} compiled and kept {count} warnings like a souvenir
+  0397: Those {count} warnings are still there on {file}
+  0398: {file} works with {count} warnings in tow
+  0399: {count} warnings did not kill the compile of {file}
+  0400: Mixed result on {file} success and {count} warnings
+
+[GROUP 016] raw=(9847, 20, 401, 25)
+  0401: Cannot find the connected file {name} from {file}
+  0402: {name} is missing for the connect in {file}
+  0403: Connected path {name} is unreachable
+  0404: {file} wants {name} but it is not there
+  0405: No luck reading {name} from {file}
+  0406: Connect target {name} failed in {file}
+  0407: Missing connect file {name}
+  0408: {name} not found for {file}
+  0409: Cannot open connected {name}
+  0410: {file} connect to {name} failed
+  0411: {name} is absent
+  0412: Connect lookup for {name} failed
+  0413: {file} cannot reach {name}
+  0414: Linked file {name} missing
+  0415: {name} does not exist
+  0416: Failed to load {name}
+  0417: {file} pointed at missing {name}
+  0418: Connect source {name} gone
+  0419: Unable to read {name}
+  0420: {name} unavailable for connect
+  0421: {file} needs {name} which is missing
+  0422: No such connected file {name}
+  0423: {name} cannot be opened
+  0424: Connect failed on {name}
+  0425: Missing dependency {name}
+
+[GROUP 017] raw=(10585, 33, 426, 25)
+  0426: Interface {name} has no implementation in {file}
+  0427: {name} is declared but never implemented
+  0428: Missing implementation for {name}
+  0429: {file} left interface {name} hanging
+  0430: No body for interface {name}
+  0431: {name} interface is incomplete
+  0432: Unimplemented interface {name}
+  0433: {name} has no matching body
+  0434: Interface {name} not filled
+  0435: {file} missing impl for {name}
+  0436: No implementation of {name}
+  0437: {name} is only an interface
+  0438: Incomplete {name} in {file}
+  0439: Implementation gap for {name}
+  0440: {name} needs a body
+  0441: Interface without code {name}
+  0442: {file} did not implement {name}
+  0443: Missing code for {name}
+  0444: {name} is abstract still
+  0445: No concrete version of {name}
+  0446: Interface {name} unmatched
+  0447: {file} forgot the impl
+  0448: {name} remains unimplemented
+  0449: Gap in interface {name}
+  0450: {name} has no realization
+
+[GROUP 018] raw=(11351, 16, 451, 25)
+  0451: Connect depth hit {limit} from {file}
+  0452: Too many nested connects limit {limit}
+  0453: {file} connected past the {limit} line
+  0454: Nesting of files went too far
+  0455: Connect chain too long limit {limit}
+  0456: Depth limit {limit} broken by connects
+  0457: File nesting too deep
+  0458: {limit} connects is the max
+  0459: {file} went too far with connects
+  0460: Connect depth exceeded
+  0461: Too many layers of connect
+  0462: Safety limit {limit} hit
+  0463: Nested connects overflow
+  0464: {file} connect tree is too tall
+  0465: Depth safety on connects
+  0466: {limit} levels of connect broken
+  0467: Connect recursion too deep
+  0468: {file} nested connects excessively
+  0469: Max connect depth reached
+  0470: Too deep connect chain
+  0471: {file} over nested the connects
+  0472: Connect limit {limit} passed
+  0473: Nesting overflow on connects
+  0474: {file} has excessive connect depth
+  0475: Depth wall hit at {limit}
+
+[GROUP 019] raw=(12055, 22, 476, 25)
+  0476: {name} is not exported for {file}
+  0477: No such export {name} in the connect
+  0478: {file} asked for {name} which is missing
+  0479: Unknown export {name} from {file}
+  0480: That name {name} is not available
+  0481: Connect cannot find export {name}
+  0482: {name} not in the export list
+  0483: Missing export {name}
+  0484: {file} wants unknown {name}
+  0485: Export {name} does not exist
+  0486: No export named {name}
+  0487: {name} is not provided
+  0488: Unknown name in connect {name}
+  0489: {file} requested missing {name}
+  0490: Export lookup failed for {name}
+  0491: {name} is not exported
+  0492: Cannot import {name}
+  0493: {file} has invalid export request
+  0494: {name} not found in exports
+  0495: Bad export name {name}
+  0496: {name} is not offered
+  0497: Export {name} missing
+  0498: {file} asked for non export
+  0499: No match for {name}
+  0500: Unknown {name} in allowlist
+
+[GROUP 020] raw=(12786, 23, 501, 25)
+  0501: {name} is not a csy file from {file}
+  0502: Wrong extension on {name} in {file}
+  0503: Connect wants a csy file not {name}
+  0504: {file} pointed at non csy {name}
+  0505: That file {name} has the wrong type
+  0506: {name} extension is off for {file}
+  0507: Incorrect file type for connect
+  0508: {name} is not csy
+  0509: Wrong kind of file {name}
+  0510: {file} connected a non csy
+  0511: Extension mismatch on {name}
+  0512: {name} should be csy
+  0513: Invalid extension for connect
+  0514: {file} used wrong file type
+  0515: {name} is the wrong format
+  0516: Connect expects csy got something else
+  0517: {name} type is incorrect
+  0518: Non csy file in connect
+  0519: {file} has bad connect target type
+  0520: Extension error on {name}
+  0521: {name} is not acceptable
+  0522: Wrong file class for {name}
+  0523: {file} connect type mismatch
+  0524: {name} fails extension check
+  0525: Only csy files allowed
+
+[GROUP 021] raw=(13575, 26, 526, 26)
+  0526: {file} changed while I was reading it
+  0527: Something touched {file} mid read
+  0528: {file} got modified during the load
+  0529: Cannot trust {file} it shifted under me
+  0530: {file} was not stable while reading
+  0531: File changed on me {file}
+  0532: {file} moved during the read
+  0533: Inconsistent read of {file}
+  0534: {file} was altered mid process
+  0535: Source {file} changed underneath
+  0536: Unstable file {file}
+  0537: {file} did not stay still
+  0538: Read interrupted by change in {file}
+  0539: {file} was edited while loading
+  0540: Change detected in {file} during read
+  0541: {file} is not consistent
+  0542: Mid read modification of {file}
+  0543: {file} shifted while open
+  0544: Cannot finish reading {file}
+  0545: {file} changed on disk
+  0546: Live change in {file}
+  0547: {file} was not static
+  0548: Read failed due to change in {file}
+  0549: {file} got updated mid way
+  0550: Unreliable source {file}
+  0551: Bro why is {file} doesn't look the same
+
+[GROUP 022] raw=(14416, 12, 552, 25)
+  0552: {file} is {size} and the limit is {limit}
+  0553: That file is way too big {size} over {limit}
+  0554: {file} crossed the {limit} line at {size}
+  0555: Too huge {file} size {size} limit {limit}
+  0556: {file} is oversized {size} versus {limit}
+  0557: Cannot take {file} it is past {limit}
+  0558: Size {size} exceeds limit {limit} for {file}
+  0559: {file} is larger than allowed {size}
+  0560: Over the hard limit with {file}
+  0561: {file} at {size} is too much
+  0562: Limit {limit} broken by {file} at {size}
+  0563: {file} is beyond {limit}
+  0564: Too big to handle {file}
+  0565: {file} size {size} is over the line
+  0566: Hard limit hit by {file}
+  0567: {file} is too large at {size}
+  0568: Cannot process {file} past {limit}
+  0569: Size limit violated by {file}
+  0570: {file} weighs too much {size}
+  0571: Oversize source {file}
+  0572: {file} exceeds safety size
+  0573: Limit {limit} vs actual {size} on {file}
+  0574: {file} is oversized for safety
+  0575: Too large file {file}
+  0576: {file} goes past {limit}
+
+[GROUP 023] raw=(15076, 15, 577, 26)
+  0577: Cannot even open {file} what happened
+  0578: {file} is missing or locked somehow
+  0579: Yeah I cannot read {file} at all
+  0580: {file} is not cooperating
+  0581: Cannot find or open {file}
+  0582: {file} is unreachable right now
+  0583: No access to {file}
+  0584: {file} will not open
+  0585: Missing or blocked {file}
+  0586: Cannot load {file}
+  0587: {file} is not available
+  0588: Unable to read {file}
+  0589: {file} refuses to open
+  0590: Access denied or missing for {file}
+  0591: {file} is gone or locked
+  0592: Cannot get into {file}
+  0593: {file} is unreadable
+  0594: No luck opening {file}
+  0595: {file} is not there or blocked
+  0596: Failed to open {file}
+  0597: {file} cannot be accessed
+  0598: Source {file} is unavailable
+  0599: {file} is out of reach
+  0600: Cannot touch {file}
+  0601: {file} is missing in action
+  0602: WHERE IS THE {file}
+
+[GROUP 024] raw=(15852, 16, 603, 25)
+  0603: Number too big at line {line} in {file}
+  0604: That literal overflows in {file} line {line}
+  0605: {file} has an oversized number at {line}:{col}
+  0606: Integer too large on line {line} of {file}
+  0607: Overflow risk at {line}:{col} in {file}
+  0608: Number does not fit in {file} at line {line}
+  0609: Literal too large in {file}
+  0610: Integer overflow in source
+  0611: Number exceeds limit at line {line}
+  0612: {file} has huge literal
+  0613: Too big integer at {line}:{col}
+  0614: Literal will not fit
+  0615: Oversized number in {file}
+  0616: Integer too wide at line {line}
+  0617: {file} literal is excessive
+  0618: Number out of range
+  0619: Big literal problem in {file}
+  0620: Integer size exceeded
+  0621: {file} has out of bounds number
+  0622: Literal overflow at line {line}
+  0623: Number too large for the type
+  0624: {file} line {line} number is huge
+  0625: Overflowing literal found
+  0626: Integer does not fit
+  0627: Too big for the integer
+
+[GROUP 025] raw=(16334, 16, 628, 25)
+  0628: Been a while {time} since last time
+  0629: Long gap of {time} since the last compile
+  0630: {time} has passed since I saw you
+  0631: Welcome back after {time}
+  0632: It has been {time} since the last one
+  0633: Long time no see {time}
+  0634: {time} since last
+  0635: Long absence
+  0636: Gap of {time}
+  0637: Welcome back
+  0638: Long time away
+  0639: {time} gap
+  0640: Been gone a while
+  0641: Missed you for {time}
+  0642: Long interval
+  0643: {time} later
+  0644: Back after long
+  0645: Extended gap
+  0646: {time} passed
+  0647: Long wait over
+  0648: Absence of {time}
+  0649: Returned after {time}
+  0650: Long time between
+  0651: Gap closed
+  0652: {time} since
+
+[GROUP 026] raw=(16942, 23, 653, 25)
+  0653: You changed it but it still fails
+  0654: Edits happened and still broken
+  0655: Changed file still failing after {count}
+  0656: New contents same result fail
+  0657: {file} was edited and still errors
+  0658: Changes were not enough
+  0659: Edited but still fail
+  0660: Changes did not fix it
+  0661: Still failing after edits
+  0662: Modified and still bad
+  0663: Changes insufficient
+  0664: Still broken after change
+  0665: Edited yet failing
+  0666: New version still fails
+  0667: Changes missed the mark
+  0668: Still error after edit
+  0669: Modified but no success
+  0670: Changes not enough
+  0671: Still failing post edit
+  0672: Edit did not solve
+  0673: Changed and still down
+  0674: Still errors after change
+  0675: Modifications failed
+  0676: Still not working
+  0677: Edit incomplete
+
+[GROUP 027] raw=(17492, 12, 678, 25)
+  0678: Comeback after {count} fails
+  0679: Finally a win after {count} losses
+  0680: Broke the fail streak of {count}
+  0681: Success after {count} bad ones
+  0682: Streak snapped after {count} fails
+  0683: Back on track after {count}
+  0684: Win after {count} fails
+  0685: Streak broken
+  0686: Success ends the run
+  0687: After {count} now good
+  0688: Comeback success
+  0689: Fail streak over
+  0690: {count} then success
+  0691: Recovered after {count}
+  0692: Win ends the fails
+  0693: Streak of fails ends
+  0694: Success returns
+  0695: After the drought
+  0696: {count} fails then win
+  0697: Comeback complete
+  0698: Fail run stopped
+  0699: Success after struggle
+  0700: Streak terminated
+  0701: Win after losses
+  0702: Recovered
+
+[GROUP 028] raw=(18010, 19, 703, 25)
+  0703: Different error this time {error}
+  0704: New problem {error} on {file}
+  0705: Not the same error as last time
+  0706: Fresh error {error} appeared
+  0707: {file} failed with a new {error}
+  0708: Different kind of fail {error}
+  0709: New error {error}
+  0710: Changed problem
+  0711: Different issue now
+  0712: {error} is new
+  0713: Fresh fail type
+  0714: Not the previous error
+  0715: New kind of problem
+  0716: {error} this time
+  0717: Different from before
+  0718: New error surfaced
+  0719: {file} has new {error}
+  0720: Changed the error
+  0721: Different fail
+  0722: {error} instead
+  0723: New problem type
+  0724: Error changed
+  0725: Different this run
+  0726: Fresh issue {error}
+  0727: Not the same
+
+[GROUP 029] raw=(18643, 14, 728, 25)
+  0728: First time ever seeing a file and it is {file}
+  0729: Memory starts here with {file}
+  0730: Brand new memory and {file} is the first
+  0731: Hello {file} you are the first one
+  0732: Empty memory until {file} showed up
+  0733: First record ever is {file}
+  0734: Debut file {file}
+  0735: Memory begins with {file}
+  0736: First ever compile {file}
+  0737: {file} opens the book
+  0738: Initial memory entry
+  0739: {file} is number one
+  0740: Starting the log with {file}
+  0741: First sighting {file}
+  0742: Memory birth is {file}
+  0743: {file} the original
+  0744: First in history
+  0745: {file} starts everything
+  0746: Empty until {file}
+  0747: First contact {file}
+  0748: Memory online with {file}
+  0749: {file} is the pioneer
+  0750: Opening entry {file}
+  0751: First one logged
+  0752: {file} begins the memory
+
+[GROUP 030] raw=(19219, 28, 753, 25)
+  0753: This file has succeeded {count} times
+  0754: {file} keeps working {count} successes
+  0755: Reliable file {file} with {count} wins
+  0756: {count} clean compiles on this exact file
+  0757: {file} is consistent at {count} successes
+  0758: Many wins on {file} already {count}
+  0759: {count} successes on this
+  0760: Reliable {file}
+  0761: {file} keeps succeeding
+  0762: Consistent winner
+  0763: {count} good runs
+  0764: {file} is steady
+  0765: Many clean compiles
+  0766: {file} trusted
+  0767: {count} wins recorded
+  0768: Steady success
+  0769: {file} performs
+  0770: Consistent {file}
+  0771: Many successes
+  0772: {file} is solid
+  0773: {count} times good
+  0774: Reliable performer
+  0775: {file} keeps delivering
+  0776: Steady wins
+  0777: {count} and counting
+
+[GROUP 031] raw=(19767, 12, 778, 25)
+  0778: New file {file} never seen this one
+  0779: Fresh face {file}
+  0780: {file} is new around here
+  0781: Have not met {file} before
+  0782: Adding {file} to the memory
+  0783: Unknown file until now {file}
+  0784: First meeting {file}
+  0785: New entry {file}
+  0786: {file} is unfamiliar
+  0787: Introducing {file}
+  0788: Fresh file detected
+  0789: {file} joins the memory
+  0790: Never seen {file}
+  0791: New to me {file}
+  0792: {file} first appearance
+  0793: Unknown until {file}
+  0794: Adding new {file}
+  0795: {file} is novel
+  0796: First time for {file}
+  0797: New file in the log
+  0798: {file} not in history
+  0799: Fresh addition {file}
+  0800: {file} is a newcomer
+  0801: Meeting {file}
+  0802: New record for {file}
+
+[GROUP 032] raw=(20281, 20, 803, 25)
+  0803: Same error {error} again on {file}
+  0804: {error} keeps showing up
+  0805: You hit {error} once more
+  0806: Same problem {error} for the {count} time
+  0807: {error} is back on this file
+  0808: Repeated {error} on {file}
+  0809: {error} again
+  0810: Same issue returns
+  0811: {error} repeats
+  0812: Familiar error {error}
+  0813: {error} once more
+  0814: Same as last time
+  0815: {error} persists
+  0816: Repeated problem
+  0817: {error} again on {file}
+  0818: Same error type
+  0819: {error} keeps appearing
+  0820: Familiar fail
+  0821: {error} is persistent
+  0822: Same again
+  0823: {error} returns
+  0824: Repeat of {error}
+  0825: {error} still here
+  0826: Same error pattern
+  0827: {error} continues
+
+[GROUP 033] raw=(20961, 25, 828, 25)
+  0828: This exact file failed {count} times already
+  0829: {count} prior fails on this same file
+  0830: Still failing this file after {count} tries
+  0831: {file} has failed {count} times before
+  0832: Multiple fails on this exact one
+  0833: {count} strikes on this same file so far
+  0834: {count} previous fails
+  0835: Repeated fails on this
+  0836: {file} keep failing
+  0837: Many prior fails {count}
+  0838: {count} fails in the past
+  0839: Still not working after {count}
+  0840: Multiple previous errors
+  0841: {file} has history of fails
+  0842: {count} times already
+  0843: Persistent fail on this
+  0844: {count} earlier fails
+  0845: This file keeps failing
+  0846: {count} fails recorded
+  0847: Long fail history
+  0848: {file} failed often
+  0849: Many attempts failed
+  0850: {count} prior problems
+  0851: Repeated failure pattern
+  0852: {count} fails so far
+
+[GROUP 034] raw=(21613, 25, 853, 25)
+  0853: You failed this exact file once already
+  0854: Same file failed before now trying again
+  0855: {file} failed once last time
+  0856: One prior failure on this exact file
+  0857: Back again after one fail on {file}
+  0858: Second chance for this exact file
+  0859: One previous fail on this
+  0860: {file} has one prior fail
+  0861: Failed once before
+  0862: Trying again after one fail
+  0863: One strike on this file
+  0864: {file} second attempt after fail
+  0865: Previously failed once
+  0866: One fail in history
+  0867: {file} failed earlier once
+  0868: Single prior failure
+  0869: Back after one miss
+  0870: One previous error
+  0871: {file} has a past fail
+  0872: Retry after one fail
+  0873: Failed this once already
+  0874: One fail on record
+  0875: Second try after fail
+  0876: {file} once failed
+  0877: One earlier failure
+
+[GROUP 035] raw=(22273, 27, 878, 25)
+  0878: Finally compiled after {count} fails
+  0879: This exact file made it after {count} tries
+  0880: {file} succeeded after {count} failures
+  0881: Took {count} fails but it works now
+  0882: Breakthrough after {count} previous fails
+  0883: {file} is good after {count} bad runs
+  0884: Success after {count} fails
+  0885: Finally after {count}
+  0886: {file} broke the fail streak
+  0887: Won after {count} losses
+  0888: {count} fails then success
+  0889: Made it after {count}
+  0890: {file} finally clean
+  0891: Success following fails
+  0892: After {count} now good
+  0893: Breakthrough on {file}
+  0894: {count} then success
+  0895: Finally working
+  0896: {file} overcame the fails
+  0897: Win after {count}
+  0898: Succeeded at last
+  0899: {count} fails behind
+  0900: Now succeeding
+  0901: {file} turned around
+  0902: Success after struggle
+
+[GROUP 036] raw=(22848, 15, 903, 25)
+  0903: {count} fails in a row
+  0904: Failure streak at {count}
+  0905: {count} bad compiles back to back
+  0906: Streak of fails continues {count}
+  0907: Another fail makes it {count}
+  0908: {count} failures straight
+  0909: Fail streak {count}
+  0910: {count} in a row bad
+  0911: Consecutive fails {count}
+  0912: Streak growing {count}
+  0913: {count} fails sequential
+  0914: Running fail count {count}
+  0915: Back to back fails
+  0916: {count} straight failures
+  0917: Fail run at {count}
+  0918: Consecutive errors
+  0919: {count} fails consecutive
+  0920: Streak of {count}
+  0921: Failures mounting
+  0922: {count} in succession
+  0923: Ongoing fail streak
+  0924: {count} bad ones
+  0925: Sequential fails
+  0926: Fail chain {count}
+  0927: Streak continues
+
+[GROUP 037] raw=(23432, 18, 928, 25)
+  0928: {count} successes in a row
+  0929: Winning streak at {count}
+  0930: {count} clean compiles back to back
+  0931: Success streak continues {count}
+  0932: Another win makes it {count}
+  0933: {count} good ones straight
+  0934: Success streak {count}
+  0935: {count} in a row good
+  0936: Consecutive wins {count}
+  0937: Streak growing {count}
+  0938: {count} successes sequential
+  0939: Running win count {count}
+  0940: Back to back successes
+  0941: {count} straight wins
+  0942: Success run at {count}
+  0943: Consecutive cleans
+  0944: {count} successes consecutive
+  0945: Streak of {count}
+  0946: Wins mounting
+  0947: {count} in succession
+  0948: Ongoing success streak
+  0949: {count} good ones
+  0950: Sequential successes
+  0951: Win chain {count}
+  0952: Streak continues
+
+[GROUP 038] raw=(24063, 20, 953, 25)
+  0953: Nothing changed and it still fails
+  0954: Same exact contents still broken
+  0955: You did not change anything and it failed
+  0956: Identical file still failing after {count}
+  0957: No edits and still the same fail
+  0958: Unchanged and still not working
+  0959: No changes still fail
+  0960: Same file same fail
+  0961: Unedited and broken
+  0962: Nothing different still error
+  0963: Identical and failing
+  0964: No modification still bad
+  0965: Same content same result
+  0966: Unchanged fail continues
+  0967: No edit still fail
+  0968: Same as last fail
+  0969: Nothing altered
+  0970: Still failing unchanged
+  0971: Identical contents fail
+  0972: No change no progress
+  0973: Same file still bad
+  0974: Unmodified and error
+  0975: Still the same problem
+  0976: No difference still fail
+  0977: Unchanged failure
+
+[GROUP 039] raw=(24743, 15, 978, 25)
+  0978: Stopped at {percent} percent of {limit}
+  0979: Memory budget almost gone {percent} percent
+  0980: Had to quit at {percent} percent usage
+  0981: {percent} percent is too close to the edge
+  0982: Memory limit nearly hit so I stopped
+  0983: Aborting at {percent} percent of {limit}
+  0984: Memory too high stopped
+  0985: {percent} percent forced stop
+  0986: Budget nearly exhausted
+  0987: Clean stop at {percent}
+  0988: Memory safety stop
+  0989: {percent} percent is the line
+  0990: Stopped to protect the system
+  0991: Memory abort at {percent}
+  0992: Too much memory used
+  0993: Halted at high usage
+  0994: {percent} percent trigger
+  0995: Memory limit action
+  0996: Stopped cleanly
+  0997: Budget protection engaged
+  0998: {percent} percent reached stop
+  0999: Memory full enough
+  1000: Abort for safety
+  1001: High memory stop
+  1002: {limit} nearly gone
+
+[GROUP 040] raw=(25384, 22, 1003, 25)
+  1003: Project needs {size} but limit is {limit}
+  1004: Too big for the memory budget
+  1005: {size} required versus {limit} allowed
+  1006: Project will not fit in memory
+  1007: Memory budget too small for this
+  1008: Needs more than {limit} to run
+  1009: Project oversized for budget
+  1010: {size} is beyond {limit}
+  1011: Cannot fit the project
+  1012: Memory demand too high
+  1013: Project exceeds budget
+  1014: {limit} is not enough
+  1015: Need larger memory limit
+  1016: Project too heavy
+  1017: Budget insufficient
+  1018: {size} over the allowed
+  1019: Cannot allocate enough
+  1020: Project memory demand high
+  1021: Limit too low for project
+  1022: {size} required more than {limit}
+  1023: Memory shortfall
+  1024: Project will not load
+  1025: Budget too tight
+  1026: Need more memory headroom
+  1027: Project size problem
+
+[GROUP 041] raw=(25995, 17, 1028, 25)
+  1028: System refused memory request of {size}
+  1029: Out of system memory at {size}
+  1030: OS said no to {size} more memory
+  1031: System memory is exhausted
+  1032: Cannot allocate {size} from the system
+  1033: Host ran out of memory
+  1034: System OOM for {size}
+  1035: No more system memory
+  1036: Allocation failed at system level
+  1037: OS memory denied
+  1038: System cannot provide {size}
+  1039: Host memory gone
+  1040: Out of memory from OS
+  1041: System level failure
+  1042: Cannot get {size} from host
+  1043: OS refused the request
+  1044: System memory empty
+  1045: Allocation rejected by system
+  1046: Host is out
+  1047: System RAM exhausted
+  1048: No system memory left
+  1049: OS out of resources
+  1050: Memory request denied
+  1051: System cannot help
+  1052: Host memory failure
+
+[GROUP 042] raw=(26612, 21, 1053, 25)
+  1053: Waiting for shared memory for {time}
+  1054: Other processes are using the budget
+  1055: Held up on shared memory for {time}
+  1056: Shared budget is busy right now
+  1057: Waiting my turn for memory
+  1058: Shared memory wait time {time}
+  1059: Delayed by shared memory
+  1060: Other builds are active
+  1061: Memory shared and busy
+  1062: Waiting on other processes
+  1063: Shared resource wait
+  1064: {time} spent waiting
+  1065: Budget in use by others
+  1066: Queued for memory
+  1067: Shared memory contention
+  1068: Waiting for free budget
+  1069: Other csyc holding memory
+  1070: Delay due to sharing
+  1071: Memory wait in progress
+  1072: {time} of wait so far
+  1073: Shared pool busy
+  1074: Holding for memory
+  1075: Other process priority
+  1076: Wait state for budget
+  1077: Shared memory lock
+
+[GROUP 043] raw=(27246, 14, 1078, 25)
+  1078: Memory at {percent} percent of {limit}
+  1079: Getting close to the memory limit
+  1080: {percent} percent used already
+  1081: Memory pressure at {percent} percent
+  1082: Approaching the {limit} budget
+  1083: {percent} percent of memory gone
+  1084: High memory use {percent}
+  1085: Memory is filling up
+  1086: {percent} percent is high
+  1087: Nearing the limit
+  1088: Memory warning at {percent}
+  1089: Budget is {percent} used
+  1090: {limit} budget under pressure
+  1091: Memory climbing to {percent}
+  1092: High usage warning
+  1093: {percent} percent reached
+  1094: Memory getting tight
+  1095: Close to the edge
+  1096: {percent} of {limit} used
+  1097: Memory caution
+  1098: Usage high at {percent}
+  1099: Approaching full
+  1100: Memory load {percent}
+  1101: Budget warning
+  1102: {percent} percent mark hit
+
+[GROUP 044] raw=(27965, 14, 1103, 25)
+  1103: Unknown module {name} at line {line} in {file}
+  1104: No such module {name} in {file}
+  1105: {file} asked for module {name} which is missing
+  1106: Module {name} not found line {line}
+  1107: {name} is not a known module
+  1108: Cannot find module {name} in {file}
+  1109: Missing module {name}
+  1110: {name} module does not exist
+  1111: Unknown include {name}
+  1112: {file} wants unknown module
+  1113: No module named {name}
+  1114: Module lookup failed for {name}
+  1115: {name} is not available
+  1116: {file} has bad module name
+  1117: Unknown {name} module
+  1118: Module {name} missing
+  1119: Cannot load module {name}
+  1120: {file} line {line} unknown module
+  1121: No such {name} to include
+  1122: Module {name} not recognized
+  1123: {name} is invalid module
+  1124: Include failed for {name}
+  1125: {file} referenced missing module
+  1126: Unknown module name {name}
+  1127: Module not found {name}
+
+[GROUP 045] raw=(28623, 14, 1128, 25)
+  1128: {name} is defined more than once in {file}
+  1129: Duplicate name {name} at line {line}
+  1130: {file} already has a {name}
+  1131: Name collision on {name} in {file}
+  1132: {name} got declared twice
+  1133: Double definition of {name} at {line}
+  1134: {name} is repeated
+  1135: Duplicate {name} found
+  1136: {file} redefines {name}
+  1137: Name {name} already used
+  1138: Collision on {name}
+  1139: {name} declared again
+  1140: Second definition of {name}
+  1141: {file} has two {name}
+  1142: Duplicate identifier {name}
+  1143: {name} appears twice
+  1144: Redefinition of {name}
+  1145: {file} line {line} duplicate {name}
+  1146: Name clash with {name}
+  1147: {name} is not unique
+  1148: Multiple {name} definitions
+  1149: {file} redeclared {name}
+  1150: Duplicate found for {name}
+  1151: {name} already exists
+  1152: Second {name} is invalid
+
+[GROUP 046] raw=(29303, 14, 1153, 25)
+  1153: {name} is not defined at line {line} in {file}
+  1154: Never saw {name} before in {file}
+  1155: Undefined name {name} on line {line}
+  1156: {file} uses {name} but it does not exist
+  1157: Where is {name} supposed to come from
+  1158: {name} is missing in {file} at {line}
+  1159: Unknown name {name}
+  1160: {name} was never declared
+  1161: {file} has undefined {name}
+  1162: No definition for {name}
+  1163: {name} does not exist
+  1164: Undefined identifier {name}
+  1165: {file} line {line} unknown {name}
+  1166: {name} is not in scope
+  1167: Missing definition of {name}
+  1168: {name} used but not made
+  1169: No such name {name}
+  1170: {file} references unknown {name}
+  1171: {name} is undeclared
+  1172: Cannot find {name}
+  1173: {name} has no origin
+  1174: Undefined at line {line}
+  1175: {file} lacks {name}
+  1176: Name {name} unknown
+  1177: {name} not found
+
+[GROUP 047] raw=(29925, 13, 1178, 25)
+  1178: Native path active for {count} functions
+  1179: {count} functions running native
+  1180: Fast path on for {count} functions
+  1181: Native code engaged for {count}
+  1182: {count} functions got the native boost
+  1183: Native speed for {count} functions
+  1184: {count} in native mode
+  1185: Native acceleration active
+  1186: Fast path for {count}
+  1187: {count} functions native
+  1188: Native enabled on {count}
+  1189: Speed boost for {count}
+  1190: {count} running native
+  1191: Native path live
+  1192: {count} functions accelerated
+  1193: Native mode on
+  1194: Fast native for {count}
+  1195: {count} in fast path
+  1196: Native active
+  1197: Acceleration for {count}
+  1198: {count} native functions
+  1199: Native path working
+  1200: Speed path for {count}
+  1201: {count} got native
+  1202: Native engaged
+
+[GROUP 048] raw=(30473, 11, 1203, 25)
+  1203: No native path for {file}
+  1204: Everything stayed interpreted in {file}
+  1205: Native fast path not available
+  1206: {file} running fully interpreted
+  1207: No functions went native
+  1208: Pure interpreted mode for {file}
+  1209: Native unavailable
+  1210: All interpreted in {file}
+  1211: No fast path
+  1212: {file} fully slow path
+  1213: Native not engaged
+  1214: Interpreted only
+  1215: No native functions
+  1216: {file} without native
+  1217: Fast path skipped
+  1218: All code interpreted
+  1219: Native path dark
+  1220: {file} no acceleration
+  1221: Pure interpreter mode
+  1222: No native boost
+  1223: {file} stayed interpreted
+  1224: Native none
+  1225: Fast path off
+  1226: Everything interpreted
+  1227: No native for {file}
+
+[GROUP 049] raw=(31162, 14, 1228, 25)
+  1228: Only {count} of {size} functions went native
+  1229: Partial native: {count} out of {size}
+  1230: Some functions native {count} total {size}
+  1231: Mixed mode {count} native of {size}
+  1232: Not everything went native {count} did
+  1233: {count} native {size} total
+  1234: Partial acceleration
+  1235: {count} of {size} native
+  1236: Mixed native and interpreted
+  1237: Some native some not
+  1238: {count} accelerated out of {size}
+  1239: Partial fast path
+  1240: {size} total {count} native
+  1241: Incomplete native coverage
+  1242: {count} got native rest did not
+  1243: Mixed execution mode
+  1244: Partial native success
+  1245: {count} native remaining interpreted
+  1246: Some functions fast
+  1247: Native partial on {count}
+  1248: {size} functions {count} native
+  1249: Incomplete boost
+  1250: Mixed path used
+  1251: {count} out of {size} fast
+  1252: Partial native mode
+
+[GROUP 050] raw=(31810, 7, 1253, 25)
+  1253: First clean compile with me around {file}
+  1254: Look at that {file} works and I am watching
+  1255: Nice start {file} first success under cooler mode
+  1256: {file} compiled and I am here for it
+  1257: Welcome to the cooler side {file}
+  1258: First one in the books {file}
+  1259: Debut success on {file}
+  1260: First win with cooler on
+  1261: {file} opens the cooler era
+  1262: Initial clean compile
+  1263: First success recorded
+  1264: {file} starts the memory
+  1265: Cooler mode first win
+  1266: {file} behaved first try
+  1267: Opening success
+  1268: First clean one
+  1269: {file} under watch and good
+  1270: Debut of cooler success
+  1271: First recorded win
+  1272: {file} first success
+  1273: Cooler debut clean
+  1274: Starting strong with {file}
+  1275: First one done
+  1276: {file} begins well
+  1277: Initial success logged
+
+[GROUP 051] raw=(32406, 7, 1278, 25)
+  1278: That took a while {file} {time}
+  1279: {file} was slow this time {time}
+  1280: Longer than usual on {file}
+  1281: {time} for {file} felt a bit heavy
+  1282: {file} made me wait {time}
+  1283: Slow one on {file} at {time}
+  1284: Extended compile on {file}
+  1285: {file} took its time
+  1286: Longer compile than expected
+  1287: {time} is notable for {file}
+  1288: {file} was not quick
+  1289: Slow compile detected
+  1290: {file} lingered at {time}
+  1291: Took longer than average
+  1292: {file} compile was heavy
+  1293: Extended time on {file}
+  1294: {time} felt long
+  1295: {file} slow path
+  1296: Compile duration high
+  1297: {file} took extra time
+  1298: Noticeable duration
+  1299: {file} was deliberate
+  1300: Slow run for {file}
+  1301: {time} on the clock
+  1302: Longer than typical
+
+[GROUP 052] raw=(33018, 7, 1303, 25)
+  1303: You finally fixed {error} after {count} times
+  1304: {error} is gone after {count} repeats on {file}
+  1305: Nice {error} stayed dead this time
+  1306: Fixed the repeating {error} on {file}
+  1307: {count} times was enough for {error}
+  1308: That stubborn {error} is gone
+  1309: {error} defeated after {count}
+  1310: Fixed the recurring one
+  1311: {error} no longer appears
+  1312: After {count} now fixed
+  1313: {error} resolved
+  1314: Repeating error fixed
+  1315: {file} no longer has {error}
+  1316: {error} cleared
+  1317: Finally rid of {error}
+  1318: {count} then fixed
+  1319: Persistent error gone
+  1320: {error} solved
+  1321: No more {error}
+  1322: Fixed at last
+  1323: {error} eliminated
+  1324: After many tries fixed
+  1325: {error} is history
+  1326: Cleared the repeat
+  1327: {error} no longer
+
+[GROUP 053] raw=(33746, 20, 1328, 25)
+  1328: Project file {file} is {size} over {limit}
+  1329: {file} is too big for a project file
+  1330: Size {size} exceeds project limit {limit}
+  1331: Project config {file} is oversized
+  1332: {file} crossed the project size line
+  1333: Too large project file at {size}
+  1334: Project size limit broken
+  1335: {file} is larger than allowed
+  1336: Config file too heavy
+  1337: {size} is past project limit
+  1338: {file} exceeds config size
+  1339: Project file oversized
+  1340: Limit {limit} vs {size} on project
+  1341: {file} is too big for config
+  1342: Project config too large
+  1343: Size safety hit on project
+  1344: {file} project file is huge
+  1345: Oversize project config
+  1346: {file} past the size limit
+  1347: Project file weight problem
+  1348: {size} too much for project
+  1349: Config size exceeded
+  1350: {file} is over the project limit
+  1351: Too big to be project config
+  1352: Project file size violation
+
+[GROUP 054] raw=(34464, 23, 1353, 25)
+  1353: Cannot read the project file {file}
+  1354: Project file is missing or locked
+  1355: {file} is not readable as project
+  1356: No luck opening project {file}
+  1357: Project file {file} is unreachable
+  1358: Cannot load project from {file}
+  1359: Missing project file {file}
+  1360: {file} project cannot open
+  1361: Project config unreadable
+  1362: {file} is not accessible
+  1363: Cannot access project {file}
+  1364: Project file blocked or gone
+  1365: {file} fails to load as project
+  1366: No project file found
+  1367: {file} is missing for project
+  1368: Unable to read project config
+  1369: Project {file} unavailable
+  1370: {file} cannot be used as project
+  1371: Project load failed
+  1372: {file} is locked or absent
+  1373: Cannot open the project
+  1374: Project file problem with {file}
+  1375: {file} is not loadable
+  1376: Missing or bad project file
+  1377: Project config out of reach
+
+[GROUP 055] raw=(35312, 16, 1378, 25)
+  1378: {file} quit with exit code {count}
+  1379: Yeah that run died exit {count} on {file}
+  1380: {file} just walked out with code {count}
+  1381: Exit code {count} from {file} not great
+  1382: {file} failed the run with {count}
+  1383: Program bailed exit {count} on {file}
+  1384: Non zero exit {count} from {file}
+  1385: {file} returned {count} and left
+  1386: Exit status {count} on {file}
+  1387: {file} ended with code {count}
+  1388: Bad exit code {count} from {file}
+  1389: {file} did not exit clean {count}
+  1390: Code {count} came back from {file}
+  1391: {file} stopped with {count}
+  1392: Nonzero from {file} code {count}
+  1393: {file} gave exit {count}
+  1394: Run failed exit {count} on {file}
+  1395: {file} returned error code {count}
+  1396: Exit {count} is what {file} left us with
+  1397: {file} closed with {count}
+  1398: Code {count} from the run of {file}
+  1399: {file} exited poorly with {count}
+  1400: Bad return code {count} on {file}
+  1401: {file} ended badly exit {count}
+  1402: Non zero {count} from {file}
+
+[GROUP 056] raw=(36006, 15, 1403, 25)
+  1403: You hit stop on {file} after {time}
+  1404: Interrupted {file} at {time}
+  1405: Ctrl C on {file} got it
+  1406: {file} stopped early after {time}
+  1407: You cancelled {file} mid way
+  1408: {file} got cut off at {time}
+  1409: Stop signal on {file} after {time}
+  1410: {file} was interrupted
+  1411: You pulled the plug on {file}
+  1412: {file} did not finish you stopped it
+  1413: Cancelled at {time} on {file}
+  1414: {file} got interrupted after {time}
+  1415: Manual stop on {file}
+  1416: {file} halted by you
+  1417: You ended {file} early
+  1418: Interrupt received for {file}
+  1419: {file} stopped by user
+  1420: Early exit on {file} after {time}
+  1421: {file} did not complete
+  1422: You cut {file} short
+  1423: Stopped {file} at {time}
+  1424: {file} interrupted mid process
+  1425: User stop on {file}
+  1426: {file} cancelled after {time}
+  1427: Manual interrupt of {file}
+
+[GROUP 057] raw=(36837, 11, 1428, 25)
+  1428: Had to rebuild {file} first before running
+  1429: {file} was stale so I fixed that for you
+  1430: Rebuilt {file} real quick then ran it
+  1431: Object was old so {file} got a fresh compile
+  1432: Touched {file} up before the run
+  1433: {file} needed a rebuild and now it is ready
+  1434: Stale object on {file} so I handled it
+  1435: {file} was out of date I fixed it
+  1436: Quick rebuild of {file} before the run
+  1437: {file} got refreshed first
+  1438: Had to recompile {file} to run it
+  1439: Object for {file} was outdated
+  1440: Rebuilt {file} on the way
+  1441: {file} needed a fresh object
+  1442: Compiled {file} again before running
+  1443: {file} was not current so I caught it up
+  1444: Rebuild happened for {file}
+  1445: {file} got a new object first
+  1446: Stale binary for {file} corrected
+  1447: {file} rebuilt and ready
+  1448: Forced a rebuild of {file}
+  1449: {file} was behind so I fixed it
+  1450: Object refresh on {file}
+  1451: {file} needed updating first
+  1452: Recompiled {file} for the run
+
+[GROUP 058] raw=(37522, 11, 1453, 25)
+  1453: {file} finished clean in {time}
+  1454: Program done {file} took {time}
+  1455: Nice run {file} no crashes
+  1456: {file} made it all the way through
+  1457: Smooth finish on {file} in {time}
+  1458: Alright {file} is done running
+  1459: {file} completed without drama
+  1460: Clean exit from {file}
+  1461: {file} ran its course in {time}
+  1462: No issues on the run of {file}
+  1463: {file} finished like it should
+  1464: Solid run on {file}
+  1465: {file} is done and dusted
+  1466: Program closed clean on {file}
+  1467: {file} exited normally
+  1468: Good run for {file} in {time}
+  1469: {file} behaved during the run
+  1470: Finished without trouble {file}
+  1471: {file} ran fine
+  1472: Clean completion for {file}
+  1473: {file} did its job
+  1474: Run success on {file}
+  1475: {file} wrapped up nicely
+  1476: No surprises from {file}
+  1477: {file} finished strong in {time}
+
+[GROUP 059] raw=(38163, 21, 1478, 25)
+  1478: Division by zero at line {line} in {file}
+  1479: Zero division crash in {file}
+  1480: {file} divided by zero on line {line}
+  1481: Cannot divide by zero at line {line}
+  1482: Runtime zero division in {file}
+  1483: Math broke at line {line} of {file}
+  1484: Divide by zero in {file}
+  1485: Zero in the denominator
+  1486: {file} hit divide by zero
+  1487: Math error zero division
+  1488: Division by zero runtime
+  1489: {file} line {line} zero div
+  1490: Cannot compute that division
+  1491: Zero divisor found
+  1492: Runtime math error
+  1493: {file} divided by nothing
+  1494: Zero division exception
+  1495: Bad division at line {line}
+  1496: {file} has zero divide
+  1497: Math fault zero
+  1498: Division error in {file}
+  1499: Zero on the bottom
+  1500: Runtime divide fail
+  1501: {file} math broke
+  1502: Division by zero hit
+
+[GROUP 060] raw=(38816, 19, 1503, 25)
+  1503: Index {count} out of range at line {line} in {file}
+  1504: Bad index {count} in {file}
+  1505: {file} accessed index {count} which is invalid
+  1506: Out of bounds index {count} on line {line}
+  1507: Index {count} does not exist there
+  1508: Range error with index {count} in {file}
+  1509: Index {count} is invalid
+  1510: Out of range access
+  1511: {file} bad index {count}
+  1512: Index beyond end
+  1513: {count} is too far
+  1514: Bounds error on index
+  1515: {file} line {line} bad index
+  1516: Index {count} out of bounds
+  1517: Invalid index {count}
+  1518: Range check failed
+  1519: {file} index error
+  1520: Too large index {count}
+  1521: Negative or high index
+  1522: Bounds violation
+  1523: Index {count} illegal
+  1524: {file} accessed bad slot
+  1525: Out of range {count}
+  1526: Index fault
+  1527: Bad access at {count}
+
+[GROUP 061] raw=(39418, 24, 1528, 25)
+  1528: Integer overflow at line {line} in {file}
+  1529: Number got too big in {file}
+  1530: Overflow on line {line} of {file}
+  1531: Integer math overflowed in {file}
+  1532: Value overflowed at line {line}
+  1533: Overflow error in {file} line {line}
+  1534: Integer too large
+  1535: Math overflow in {file}
+  1536: Number wrapped or failed
+  1537: Overflow at runtime
+  1538: {file} integer overflow
+  1539: Calculation too big
+  1540: Integer limit hit
+  1541: Overflow on that math
+  1542: {file} line {line} overflow
+  1543: Number out of range
+  1544: Integer calculation failed
+  1545: Overflow detected
+  1546: Math result too large
+  1547: {file} has overflow
+  1548: Runtime integer problem
+  1549: Value too big
+  1550: Overflow in computation
+  1551: Integer fault
+  1552: Number overflowed
+
+[GROUP 062] raw=(40067, 20, 1553, 25)
+  1553: {name} is not callable at line {line} in {file}
+  1554: Tried to call non function {name}
+  1555: {file} called {name} which is not a function
+  1556: Not a function: {name} on line {line}
+  1557: Cannot call {name} like that
+  1558: {name} is not callable in {file}
+  1559: {name} cannot be called
+  1560: Non callable {name}
+  1561: {file} tried to call {name}
+  1562: {name} is not a function
+  1563: Call on non function
+  1564: {name} has no call
+  1565: Attempt to call {name}
+  1566: {file} line {line} bad call
+  1567: {name} is data not code
+  1568: Cannot invoke {name}
+  1569: Non function call
+  1570: {name} not invokable
+  1571: Call target wrong
+  1572: {file} called wrong thing
+  1573: {name} is not callable
+  1574: Invalid call target
+  1575: Tried calling {name}
+  1576: Not a callable value
+  1577: Call failed on {name}
+
+[GROUP 063] raw=(40737, 13, 1578, 25)
+  1578: Runtime error at line {line} in {file}
+  1579: Something crashed in {file} at line {line}
+  1580: {file} hit a runtime problem on line {line}
+  1581: Unexpected runtime fail at {line}
+  1582: Runtime issue in {file} line {line}
+  1583: Program errored at line {line} of {file}
+  1584: Runtime fault in {file}
+  1585: Crash at line {line}
+  1586: {file} runtime problem
+  1587: Unexpected error during run
+  1588: Runtime failure
+  1589: {file} has runtime error
+  1590: Problem at runtime line {line}
+  1591: {file} crashed
+  1592: Runtime exception
+  1593: Error during execution
+  1594: {file} line {line} runtime fail
+  1595: Unexpected runtime issue
+  1596: Program fault at line {line}
+  1597: Runtime problem found
+  1598: {file} had a runtime error
+  1599: Execution error
+  1600: Runtime crash
+  1601: Fault in running code
+  1602: Unexpected fail at runtime
+
+[GROUP 064] raw=(41379, 21, 1603, 25)
+  1603: Program out of memory needing {size} in {file}
+  1604: {file} asked for too much memory
+  1605: Runtime memory fail at {size}
+  1606: Not enough memory for {file}
+  1607: Allocation of {size} failed in {file}
+  1608: Program memory exhausted
+  1609: Runtime OOM in {file}
+  1610: Memory request {size} failed
+  1611: Program cannot get memory
+  1612: Out of memory during run
+  1613: {file} memory hungry
+  1614: Allocation failed
+  1615: Runtime memory error
+  1616: {size} not available
+  1617: Program ran dry on memory
+  1618: Memory allocation fail
+  1619: {file} exhausted memory
+  1620: No memory left for program
+  1621: Runtime out of RAM
+  1622: Memory denied to program
+  1623: {file} needs more than available
+  1624: Program memory crisis
+  1625: Allocation of {size} refused
+  1626: Runtime memory short
+  1627: Out of memory crash
+
+[GROUP 065] raw=(42038, 23, 1628, 25)
+  1628: Recursion limit {limit} hit by {name} in {file}
+  1629: {name} called itself too many times
+  1630: Stack too deep for {name} at line {line}
+  1631: {file} recursion on {name} past {limit}
+  1632: Too much recursion in {name}
+  1633: Recursion limit broken by {name}
+  1634: Deep recursion in {name}
+  1635: {name} stacked too far
+  1636: Recursion overflow
+  1637: {limit} calls deep on {name}
+  1638: Stack limit hit by {name}
+  1639: {file} recursive {name} too deep
+  1640: Too many self calls
+  1641: Recursion safety triggered
+  1642: {name} went too deep
+  1643: Stack depth exceeded
+  1644: {file} recursion problem
+  1645: Limit {limit} on {name}
+  1646: Recursive call flood
+  1647: {name} recursion maxed
+  1648: Deep call stack
+  1649: Recursion abort
+  1650: {name} called past limit
+  1651: Stack overflow style
+  1652: Too recursive {name}
+
+[GROUP 066] raw=(42657, 12, 1653, 25)
+  1653: Type error at line {line} in {file}
+  1654: Wrong kind of value in {file}
+  1655: {file} has a type mismatch on line {line}
+  1656: Cannot do that with this type at line {line}
+  1657: Type problem in {file} line {line}
+  1658: Value type is wrong at {line}
+  1659: Type mismatch runtime
+  1660: Wrong type used
+  1661: {file} type error
+  1662: Incompatible type
+  1663: Type check failed at runtime
+  1664: {file} line {line} type issue
+  1665: Bad type for operation
+  1666: Type error in value
+  1667: Wrong type at runtime
+  1668: {file} has type fault
+  1669: Operation on wrong type
+  1670: Type mismatch found
+  1671: Runtime type problem
+  1672: Value is wrong kind
+  1673: Type error hit
+  1674: {file} type wrong
+  1675: Incompatible value
+  1676: Type fault at line {line}
+  1677: Wrong type for that
+
+[GROUP 067] raw=(43299, 23, 1678, 25)
+  1678: Unknown built in {name} at line {line} in {file}
+  1679: No such built in {name}
+  1680: {file} called missing built in {name}
+  1681: Built in {name} does not exist
+  1682: Unknown function {name} on line {line}
+  1683: No built in named {name} in {file}
+  1684: {name} is not a built in
+  1685: Missing built in {name}
+  1686: Unknown {name} function
+  1687: No such built in
+  1688: {file} has unknown built in
+  1689: {name} not recognized
+  1690: Built in lookup failed
+  1691: {name} is not built in
+  1692: Unknown name {name}
+  1693: No built in {name}
+  1694: {file} line {line} unknown built in
+  1695: {name} does not exist as built in
+  1696: Invalid built in call
+  1697: {name} not found in builtins
+  1698: Built in missing
+  1699: Unknown {name}
+  1700: No function {name}
+  1701: Built in error
+  1702: {name} is invalid built in
+
+[GROUP 068] raw=(43883, 10, 1703, 25)
+  1703: {file} is a big one at {size}
+  1704: Large source file {file} size {size}
+  1705: {file} came in heavy at {size}
+  1706: That is a hefty file {file}
+  1707: Big source {file} weighing {size}
+  1708: {file} is large {size}
+  1709: Substantial file {file}
+  1710: {file} is sizeable
+  1711: Large input {file}
+  1712: {file} has real weight
+  1713: Big file detected {file}
+  1714: {size} is notable for {file}
+  1715: {file} is on the large side
+  1716: Hefty source {file}
+  1717: {file} comes in large
+  1718: Sizeable {file}
+  1719: {file} is not small
+  1720: Large codebase piece {file}
+  1721: {file} has bulk
+  1722: Big one {file}
+  1723: {file} size stands out
+  1724: Notable size on {file}
+  1725: {file} is substantial
+  1726: Large file alert
+  1727: {file} is big
+
+[GROUP 069] raw=(44678, 11, 1728, 25)
+  1728: That is elif not orf line {line} in {file}
+  1729: You wrote elif at {line}:{col} in {file}
+  1730: {file} line {line} has elif try orf instead
+  1731: Elif spotted in {file} at line {line}
+  1732: Wrong keyword elif on line {line} of {file}
+  1733: {file} still using elif at {line}:{col}
+  1734: Elif is not the word here {file}
+  1735: Use orf not elif in {file}
+  1736: {file} has elif which is wrong
+  1737: Elif detected at line {line}
+  1738: That should be orf not elif
+  1739: {file} line {line} says elif
+  1740: Wrong branch keyword in {file}
+  1741: Elif does not belong in {file}
+  1742: Change elif to orf at line {line}
+  1743: {file} used elif by mistake
+  1744: Elif found where orf belongs
+  1745: {file} has the old elif style
+  1746: Keyword elif is incorrect here
+  1747: {file} needs orf not elif
+  1748: Elif at {line}:{col} in {file}
+  1749: That elif should be orf
+  1750: {file} is using elif still
+  1751: Fix the elif on line {line}
+  1752: Orf is the correct word not elif
+
+[GROUP 070] raw=(45596, 15, 1753, 25)
+  1753: Expected {name} at line {line} col {col} in {file}
+  1754: Missing {name} right there line {line} of {file}
+  1755: {file} line {line} wanted {name} and did not get it
+  1756: Look at line {line} in {file} it needs {name}
+  1757: Parser wanted {name} at {line}:{col} in {file}
+  1758: {name} is missing on line {line} of {file}
+  1759: {file} expected {name} at line {line}
+  1760: No {name} where it should be in {file}
+  1761: Missing piece {name} at {line}:{col}
+  1762: {file} needs {name} on line {line}
+  1763: Expected token {name} not found
+  1764: {name} should be at line {line} in {file}
+  1765: Parser looking for {name} in {file}
+  1766: {file} is missing {name} at that spot
+  1767: Line {line} of {file} lacks {name}
+  1768: {name} was expected and absent
+  1769: {file} syntax wants {name}
+  1770: No {name} at the expected place
+  1771: {name} is required at line {line}
+  1772: Missing {name} in {file}
+  1773: {file} at line {line} needs {name}
+  1774: Expected {name} did not appear
+  1775: {name} gap at {line}:{col} in {file}
+  1776: {file} is short one {name}
+  1777: Wanted {name} got something else
+
+[GROUP 071] raw=(46356, 12, 1778, 25)
+  1778: Syntax problem at line {line} in {file}
+  1779: Something is off in {file} around {line}:{col}
+  1780: {file} has a syntax issue on line {line}
+  1781: Parser tripped at {line}:{col} in {file}
+  1782: Odd syntax in {file} line {line}
+  1783: {file} is not parsing clean at line {line}
+  1784: Syntax error in {file}
+  1785: Parse failed at line {line}
+  1786: {file} syntax is broken there
+  1787: Unexpected syntax at {line}:{col}
+  1788: {file} has bad syntax
+  1789: Parser error on line {line}
+  1790: Syntax mess in {file}
+  1791: {file} line {line} is invalid
+  1792: Bad form at {line}:{col}
+  1793: Syntax does not check out
+  1794: {file} failed to parse cleanly
+  1795: Issue in the syntax of {file}
+  1796: Parse problem at line {line}
+  1797: {file} has structural error
+  1798: Syntax fault in {file}
+  1799: Unexpected structure at line {line}
+  1800: {file} is syntactically off
+  1801: Bad syntax found
+  1802: Parse rejected that part of {file}
+
+[GROUP 072] raw=(47216, 20, 1803, 25)
+  1803: Single operator instead of double at line {line} in {file}
+  1804: You need the double version line {line} of {file}
+  1805: {file} line {line} has a lonely operator
+  1806: Bitwise looking thing at {line}:{col} in {file}
+  1807: Wrong operator style on line {line} of {file}
+  1808: Single operator spotted in {file} at {line}
+  1809: Use the double form not single
+  1810: {file} has single where double belongs
+  1811: Operator should be doubled at line {line}
+  1812: Single form found in {file}
+  1813: Wrong length operator in {file}
+  1814: Double it up at line {line}
+  1815: {file} used single operator
+  1816: Logical operator needs two chars
+  1817: Single form at {line}:{col}
+  1818: {file} has short operator
+  1819: Need the double form not the single
+  1820: Operator too short in {file}
+  1821: Single version used by mistake
+  1822: {file} line {line} operator is single
+  1823: Double the operator please
+  1824: Short operator detected
+  1825: {file} needs the long form
+  1826: Single char operator wrong here
+  1827: Use full logical operator
+
+[GROUP 073] raw=(47981, 16, 1828, 25)
+  1828: Stray ::ext at line {line} in {file}
+  1829: Nothing open but ::ext showed up in {file}
+  1830: {file} line {line} has a lonely ::ext
+  1831: Extra ::ext floating at {line}:{col} in {file}
+  1832: That ::ext has nowhere to go in {file}
+  1833: Unmatched ::ext on line {line} of {file}
+  1834: Lonely ::ext in {file}
+  1835: ::ext without a block in {file}
+  1836: Stray closer at line {line}
+  1837: {file} has unmatched ::ext
+  1838: No open block for that ::ext
+  1839: Extra ::ext in {file} at {line}
+  1840: ::ext appeared alone
+  1841: {file} closed nothing with ::ext
+  1842: Unmatched extension marker
+  1843: ::ext is out of place in {file}
+  1844: No block to close at line {line}
+  1845: Stray ::ext detected
+  1846: {file} has a floating ::ext
+  1847: ::ext with no pair
+  1848: Lonely closer in {file}
+  1849: {file} line {line} ::ext is extra
+  1850: Nothing to match that ::ext
+  1851: Unbalanced ::ext in {file}
+  1852: Extra end marker at {line}
+
+[GROUP 074] raw=(48726, 15, 1853, 25)
+  1853: Nesting hit the {limit} wall in {file}
+  1854: Too deep at line {line} of {file} limit {limit}
+  1855: {file} went past {limit} levels of nesting
+  1856: Expression too thick in {file} at {line}
+  1857: Depth limit {limit} broken in {file}
+  1858: {file} nested itself into trouble at {line}
+  1859: Nesting too far in {file}
+  1860: {limit} levels is the max
+  1861: {file} is nested past safety
+  1862: Too much depth at line {line}
+  1863: Expression chain too long
+  1864: {file} hit nesting limit {limit}
+  1865: Deep nesting problem in {file}
+  1866: Limit {limit} exceeded
+  1867: {file} went too deep
+  1868: Nesting overflow at {line}
+  1869: Structure too nested in {file}
+  1870: Depth safety triggered
+  1871: {file} nesting is excessive
+  1872: Too many layers in {file}
+  1873: Nesting limit reached
+  1874: {file} is over nested
+  1875: Chain too long at line {line}
+  1876: Depth {limit} broken
+  1877: {file} nested beyond limit
+
+[GROUP 075] raw=(49478, 22, 1878, 25)
+  1878: Stopped at {count} errors in {file}
+  1879: {file} has too many problems already {count}
+  1880: Gave up after {count} errors in {file}
+  1881: {count} errors is enough for {file}
+  1882: {file} is a mess with {count} errors
+  1883: Cutting off {file} after {count} issues
+  1884: Error limit hit in {file}
+  1885: {count} errors and done
+  1886: {file} has excessive errors
+  1887: Too many to continue on {file}
+  1888: Stopped reading {file} at {count}
+  1889: {count} is past the error budget
+  1890: {file} error count too high
+  1891: Giving up on {file}
+  1892: Error flood in {file}
+  1893: {count} errors stopped the parse
+  1894: {file} is too broken
+  1895: Max errors reached on {file}
+  1896: {file} has {count} and counting stopped
+  1897: Error overflow in {file}
+  1898: Parse halted on {file}
+  1899: {count} errors is the limit
+  1900: {file} too error heavy
+  1901: Stopped after {count} in {file}
+  1902: Error budget spent on {file}
+
+[GROUP 076] raw=(50248, 26, 1903, 25)
+  1903: String never closed in {file} line {line}
+  1904: Missing quote at line {line} of {file}
+  1905: {file} has an open string at {line}:{col}
+  1906: That string keeps going forever in {file}
+  1907: Unclosed string on line {line} in {file}
+  1908: Quote problem at {line}:{col} in {file}
+  1909: Open string in {file}
+  1910: No closing quote found
+  1911: String runs away in {file}
+  1912: {file} string is not finished
+  1913: Missing end quote at line {line}
+  1914: Unterminated string literal
+  1915: {file} left a string open
+  1916: Quote never closed in {file}
+  1917: String starts but does not end
+  1918: Open quote at {line}:{col}
+  1919: {file} has unfinished string
+  1920: No matching quote found
+  1921: String leaks past line {line}
+  1922: Unclosed quote in {file}
+  1923: {file} string is incomplete
+  1924: Missing closer for the string
+  1925: String open ended in {file}
+  1926: Quote imbalance at line {line}
+  1927: Unfinished string literal
+
+[GROUP 077] raw=(50969, 23, 1928, 25)
+  1928: Constant condition at line {line} in {file}
+  1929: That if or while never changes in {file}
+  1930: Always true or false at {line}:{col}
+  1931: {file} has a fixed condition on line {line}
+  1932: Condition is constant in {file}
+  1933: Pointless condition check at line {line}
+  1934: Constant test in {file}
+  1935: Condition never varies
+  1936: {file} has static condition
+  1937: Always the same result
+  1938: Fixed condition at line {line}
+  1939: {file} condition is constant
+  1940: No variation in the test
+  1941: Constant if or while
+  1942: {file} line {line} fixed test
+  1943: Condition cannot change
+  1944: Static boolean in {file}
+  1945: Always true or always false
+  1946: Pointless branch condition
+  1947: {file} has constant logic
+  1948: Fixed value condition
+  1949: Condition is not dynamic
+  1950: {file} test is constant
+  1951: Unchanging condition
+  1952: Constant expression used
+
+[GROUP 078] raw=(51655, 15, 1953, 25)
+  1953: Deprecated {name} at line {line} in {file}
+  1954: {name} is old and not preferred
+  1955: {file} still uses deprecated {name}
+  1956: That feature {name} is on the way out
+  1957: Deprecated call to {name} on line {line}
+  1958: {name} is marked deprecated in {file}
+  1959: {name} is deprecated
+  1960: Old feature {name} used
+  1961: {file} has deprecated {name}
+  1962: Prefer something else over {name}
+  1963: {name} will go away
+  1964: Deprecated usage of {name}
+  1965: {file} line {line} uses old {name}
+  1966: {name} is outdated
+  1967: Avoid {name} if possible
+  1968: Deprecated in {file}
+  1969: {name} is legacy
+  1970: Old style {name}
+  1971: {file} relies on deprecated
+  1972: {name} marked for removal
+  1973: Use of deprecated {name}
+  1974: {file} has old feature
+  1975: {name} is not current
+  1976: Deprecated path taken
+  1977: Prefer newer than {name}
+
+[GROUP 079] raw=(52313, 18, 1978, 25)
+  1978: Duplicate key {name} at line {line} in {file}
+  1979: Key {name} appears more than once
+  1980: {file} has repeated key {name}
+  1981: Later value wins for key {name}
+  1982: Double key {name} in the dictionary
+  1983: {name} key is duplicated on line {line}
+  1984: Repeated key {name}
+  1985: {name} used twice as key
+  1986: Duplicate dictionary key
+  1987: {file} repeats key {name}
+  1988: Key collision on {name}
+  1989: {name} appears twice
+  1990: Later {name} overwrites
+  1991: Duplicate in dict {name}
+  1992: {file} has two {name} keys
+  1993: Key {name} not unique
+  1994: Repeated {name} in map
+  1995: {file} line {line} duplicate key
+  1996: {name} key conflict
+  1997: Dict has two {name}
+  1998: Overwriting key {name}
+  1999: {name} defined twice in dict
+  2000: Duplicate key found
+  2001: {file} dict key clash
+  2002: Key {name} repeated
+
+[GROUP 080] raw=(53062, 18, 2003, 25)
+  2003: {name} hides a built in at line {line} in {file}
+  2004: You shadowed {name} which is a built in
+  2005: Built in name {name} got covered in {file}
+  2006: {file} reuses built in name {name}
+  2007: Careful {name} is already a built in
+  2008: Shadowing built in {name} on line {line}
+  2009: {name} covers a built in
+  2010: Built in {name} is hidden
+  2011: {file} shadows {name}
+  2012: Name clash with built in {name}
+  2013: {name} is a built in name
+  2014: Shadowing detected for {name}
+  2015: {file} hides built in {name}
+  2016: Built in covered by {name}
+  2017: {name} overrides built in
+  2018: Caution on {name} name
+  2019: Built in shadow at line {line}
+  2020: {file} uses built in name
+  2021: {name} is reserved in a way
+  2022: Shadow of built in {name}
+  2023: {file} line {line} hides {name}
+  2024: Built in name reused
+  2025: {name} collides with built in
+  2026: Hiding built in with {name}
+  2027: Name {name} is special
+
+[GROUP 081] raw=(53789, 27, 2028, 25)
+  2028: Assigning to loop variable {name} at line {line}
+  2029: {name} is the loop var and got changed
+  2030: {file} modifies its own loop variable {name}
+  2031: Careful with {name} inside its loop
+  2032: Loop variable {name} got written to
+  2033: Changing {name} mid loop in {file}
+  2034: Loop var {name} assigned
+  2035: Writing to {name} in its loop
+  2036: {file} changes loop {name}
+  2037: {name} modified inside loop
+  2038: Assignment to loop control
+  2039: {name} is loop variable
+  2040: Changing the loop var
+  2041: {file} writes to {name}
+  2042: Loop variable mutation
+  2043: {name} gets new value in loop
+  2044: Modifying {name} during loop
+  2045: {file} line {line} changes {name}
+  2046: Loop var assignment
+  2047: {name} is being overwritten
+  2048: Assignment inside own loop
+  2049: {file} alters {name}
+  2050: Loop control changed
+  2051: {name} reassigned in loop
+  2052: Changing iteration variable
+
+[GROUP 082] raw=(54471, 10, 2053, 25)
+  2053: Warning at line {line} in {file}
+  2054: Something to check in {file} around {line}:{col}
+  2055: {file} has a warning on line {line}
+  2056: Mild issue at {line}:{col} in {file}
+  2057: Warning spotted in {file} line {line}
+  2058: {file} triggered a general warning
+  2059: General warning in {file}
+  2060: Something odd at line {line}
+  2061: {file} has a soft issue
+  2062: Warning during check
+  2063: {file} line {line} warning
+  2064: Mild problem found
+  2065: Warning generated for {file}
+  2066: {file} has something to note
+  2067: Soft error at {line}:{col}
+  2068: Warning in the code
+  2069: {file} produced a warning
+  2070: Check this at line {line}
+  2071: {file} has a notice
+  2072: General warning raised
+  2073: Something worth a look
+  2074: {file} warning at {line}
+  2075: Mild concern in {file}
+  2076: Warning issued
+  2077: Note this in {file}
+
+[GROUP 083] raw=(55166, 16, 2078, 25)
+  2078: {name} assigned to itself at line {line} in {file}
+  2079: Self assignment on {name} does nothing
+  2080: {file} has {name} equals {name}
+  2081: Pointless self assign of {name}
+  2082: {name} set to itself on line {line}
+  2083: That assignment changes nothing for {name}
+  2084: Self assign of {name}
+  2085: {name} to {name} is useless
+  2086: No effect assignment
+  2087: {file} self assigns {name}
+  2088: Pointless {name} equals {name}
+  2089: Self write to {name}
+  2090: {name} assigned to same
+  2091: No change from that assign
+  2092: {file} line {line} self assign
+  2093: Useless assignment of {name}
+  2094: {name} gets itself
+  2095: Self assignment detected
+  2096: {file} has no op assign
+  2097: {name} equals {name} found
+  2098: Assignment with no effect
+  2099: Self target on {name}
+  2100: {file} did nothing with {name}
+  2101: Pointless write to {name}
+  2102: No op on {name}
+
+[GROUP 084] raw=(55826, 27, 2103, 25)
+  2103: {name} outside any loop at line {line} in {file}
+  2104: No loop for that {name} in {file}
+  2105: {file} used {name} in the wrong place
+  2106: {name} only works inside loops
+  2107: Stray {name} on line {line} of {file}
+  2108: {name} has no loop to affect
+  2109: {name} outside loop
+  2110: Misplaced {name}
+  2111: {file} has {name} without loop
+  2112: No enclosing loop for {name}
+  2113: {name} in wrong context
+  2114: Loop control outside loop
+  2115: {file} line {line} bad {name}
+  2116: {name} needs a loop
+  2117: Stray loop control
+  2118: {name} has no target loop
+  2119: Outside loop use of {name}
+  2120: {file} misplaced {name}
+  2121: Invalid {name} placement
+  2122: {name} not in loop
+  2123: Loop keyword out of place
+  2124: {file} has free {name}
+  2125: {name} without loop
+  2126: Bad location for {name}
+  2127: {name} is loop only
+
+[GROUP 085] raw=(56525, 16, 2128, 25)
+  2128: Unreachable code at line {line} in {file}
+  2129: That part never runs in {file}
+  2130: Dead code spotted at {line}:{col}
+  2131: {file} has code after an exit on line {line}
+  2132: Nothing reaches line {line} in {file}
+  2133: Unreachable statement in {file}
+  2134: Dead code in {file}
+  2135: Code after exit at line {line}
+  2136: {file} has unreachable part
+  2137: That statement is never hit
+  2138: Unreachable at {line}:{col}
+  2139: {file} line {line} is dead
+  2140: Code cannot be reached
+  2141: After exit code found
+  2142: {file} has dead section
+  2143: Unreachable block
+  2144: Statement after return like
+  2145: {file} has code past the end
+  2146: Dead path at line {line}
+  2147: Nothing executes that
+  2148: Unreachable in {file}
+  2149: Code after terminal statement
+  2150: {file} line {line} never runs
+  2151: Dead code detected
+  2152: Unreachable fragment

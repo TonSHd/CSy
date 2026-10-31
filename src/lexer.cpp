@@ -170,7 +170,6 @@ public:
                         col_ += 8;
                         continue;
                     }
-                    // otherwise it's a comment - skip to end of line
                     while (pos_ < src_.size() && src_[pos_] != '\n') {
                         pos_++;
                     }

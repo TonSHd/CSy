@@ -75,9 +75,27 @@ struct Rewriter {
     std::unordered_map<std::string, std::string> target_cache{};
     const std::unordered_map<std::string, size_t>* arity = nullptr;
     std::vector<std::string>* warnings = nullptr;
+    const std::unordered_map<std::string, const Expr*>* using_aliases = nullptr;
+    int alias_depth = 0;
 
     void expr(ExprPtr& e, const std::unordered_set<std::string>& locals) {
         if (!e) return;
+        if (e->kind == ExprKind::Ident && using_aliases && alias_depth < 4 && !locals.count(e->name) &&
+            !own_symbols.count(e->name)) {
+            auto source = using_aliases->find(e->name);
+            if (source != using_aliases->end()) {
+                const Expr& target = *source->second;
+                ExprPtr member = make_expr(ExprKind::Member, e->tok);
+                member->object = make_expr(ExprKind::Ident, target.object->tok);
+                member->object->name = target.object->name;
+                member->name = target.name;
+                e = std::move(member);
+                ++alias_depth;
+                expr(e, locals);
+                --alias_depth;
+                return;
+            }
+        }
         if (e->kind == ExprKind::Member && e->object && e->object->kind == ExprKind::Ident) {
             auto alias = aliases.find(e->object->name);
             if (alias != aliases.end()) {
@@ -212,6 +230,19 @@ bool namespace_project_symbols(std::vector<SourceUnit>& units, std::string& erro
         Rewriter rewriter{symbols_by_file[unit.path], globals, aliases, symbols_by_file, unit.path};
         rewriter.arity = &arity_by_symbol;
         rewriter.warnings = warnings;
+        std::unordered_set<std::string> module_aliases;
+        for (const auto& s : unit.parsed.module.body)
+            if (s && s->kind == StmtKind::Import) module_aliases.insert(s->import_alias);
+        std::unordered_map<std::string, const Expr*> using_map;
+        for (const auto& s : unit.parsed.module.body) {
+            if (!s || s->kind != StmtKind::Using || !s->using_expr || s->using_expr->kind != ExprKind::Member) continue;
+            const Expr& target = *s->using_expr;
+            if (!target.object || target.object->kind != ExprKind::Ident || target.name == "out") continue;
+            if (target.object->name == s->using_alias) continue;
+            if (!module_aliases.count(target.object->name) && !aliases.count(target.object->name)) continue;
+            using_map[s->using_alias] = &target;
+        }
+        rewriter.using_aliases = &using_map;
         rewriter.body(unit.parsed.module.body, {});
     }
     return true;
@@ -235,3 +266,4 @@ std::vector<std::string> top_level_names(const Module& module, bool include_priv
     return names;
 }
 }
+

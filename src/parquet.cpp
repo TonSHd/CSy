@@ -23,7 +23,7 @@ namespace {
 enum PType { P_BOOLEAN = 0, P_INT32 = 1, P_INT64 = 2, P_INT96 = 3, P_FLOAT = 4, P_DOUBLE = 5, P_BYTE_ARRAY = 6, P_FIXED = 7 };
 enum Encoding { E_PLAIN = 0, E_PLAIN_DICT = 2, E_RLE = 3, E_BIT_PACKED = 4, E_DELTA_BINARY = 5,
                 E_DELTA_LENGTH = 6, E_DELTA_BYTE = 7, E_RLE_DICT = 8, E_BYTE_STREAM_SPLIT = 9 };
-enum Codec { C_UNCOMPRESSED = 0, C_SNAPPY = 1, C_GZIP = 2 };
+enum Codec { C_UNCOMPRESSED = 0, C_SNAPPY = 1, C_GZIP = 2, C_ZSTD = 6 };
 enum PageType { PG_DATA = 0, PG_INDEX = 1, PG_DICT = 2, PG_DATA_V2 = 3 };
 enum Repetition { R_REQUIRED = 0, R_OPTIONAL = 1, R_REPEATED = 2 };
 constexpr int CT_UTF8 = 0;
@@ -565,7 +565,8 @@ Span inflate_block(int codec, const uint8_t* in, size_t in_n, size_t out_n, std:
     scratch.assign(out_n, 0);
     if (codec == C_SNAPPY) compress::snappy_decompress(in, in_n, scratch.data(), out_n);
     else if (codec == C_GZIP) compress::gzip_decompress(in, in_n, scratch.data(), out_n);
-    else fail("compression codec " + codec_name(codec) + " is not supported (supported: UNCOMPRESSED, SNAPPY, GZIP)");
+    else if (codec == C_ZSTD) compress::zstd_decompress(in, in_n, scratch.data(), out_n);
+    else fail("compression codec " + codec_name(codec) + " is not supported (supported: UNCOMPRESSED, SNAPPY, GZIP, ZSTD)");
     return {scratch.data(), out_n};
 }
 
@@ -718,9 +719,9 @@ void read_chunk(std::ifstream& in, uint64_t fsize, const ColMeta& m, const Leaf&
     if (!m.present) fail("column '" + leaf.name + "' has no metadata");
     if (m.external) fail("column '" + leaf.name + "' is stored in another file, which is not supported");
     if (m.type != leaf.ptype) fail("column '" + leaf.name + "' has a type that disagrees with the schema");
-    if (m.codec != C_UNCOMPRESSED && m.codec != C_SNAPPY && m.codec != C_GZIP) {
+    if (m.codec != C_UNCOMPRESSED && m.codec != C_SNAPPY && m.codec != C_GZIP && m.codec != C_ZSTD) {
         fail("column '" + leaf.name + "' uses " + codec_name(m.codec) +
-             " compression, which is not supported (supported: UNCOMPRESSED, SNAPPY, GZIP)");
+             " compression, which is not supported (supported: UNCOMPRESSED, SNAPPY, GZIP, ZSTD)");
     }
     if (m.num_values != expect_rows) fail("column '" + leaf.name + "' has " + std::to_string(m.num_values) +
                                           " values but its row group has " + std::to_string(expect_rows) + " rows");
@@ -1570,3 +1571,4 @@ void write(const std::string& path, const Value& table) {
 
 }
 }
+

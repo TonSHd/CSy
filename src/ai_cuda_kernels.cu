@@ -110,7 +110,7 @@ bool copy_to_device(float* destination, const std::vector<float>& source,
 bool launch_ok(const char* action, char* error, size_t capacity) {
     return cuda_ok(cudaGetLastError(), action, error, capacity);
 }
-} // namespace
+}
 
 extern "C" int csy_ai_cuda_mlp_train(
     const double* input, const double* target,
@@ -178,7 +178,6 @@ extern "C" int csy_ai_cuda_mlp_train(
         const int w1_blocks = static_cast<int>((w1_count + threads - 1) / threads);
         const int w2_blocks = static_cast<int>((w2_count + threads - 1) / threads);
         for (size_t epoch = 0; epoch < epochs; ++epoch) {
-            // Row-major Y=X*W is column-major Y^T=W^T*X^T in the same buffers.
             if (!cublas_ok(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                     static_cast<int>(hidden_width), static_cast<int>(batch),
                     static_cast<int>(input_width), &alpha, d_w1.data,
@@ -274,3 +273,4 @@ extern "C" int csy_ai_cuda_mlp_train(
         return 19;
     }
 }
+

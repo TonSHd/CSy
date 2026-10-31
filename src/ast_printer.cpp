@@ -1,5 +1,5 @@
-// dis is ast printer
 #include "ast_printer.hpp"
+
 #include <sstream>
 
 namespace csy {
@@ -188,3 +188,4 @@ std::string print_ast(const Module& mod) {
 }
 
 }
+

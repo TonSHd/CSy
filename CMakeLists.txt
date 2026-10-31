@@ -37,8 +37,10 @@ set(CSY_SOURCES
     src/value.cpp
     src/builtins_ext.cpp
     src/compress.cpp
+    src/zstd.cpp
     src/json.cpp
     src/parquet.cpp
+    src/csv.cpp
     src/dataset.cpp
     src/ai_ops.cpp
     src/pi.cpp
@@ -54,7 +56,6 @@ find_package(Threads REQUIRED)
 target_link_libraries(csyc PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 target_link_options(csyc PRIVATE -static-libstdc++ -static-libgcc)
 
-# GPU
 find_program(CSY_NVCC nvcc)
 if(CSY_NVCC)
     set(CSY_CUDA_PLUGIN_DIR "${CMAKE_SOURCE_DIR}/third_party/csy_ai_cuda")

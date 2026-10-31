@@ -2,6 +2,7 @@
 #include "suggest.hpp"
 #include <cctype>
 #include <unordered_map>
+#include <unordered_set>
 #include <stdexcept>
 #include <sstream>
 #include <cmath>
@@ -16,6 +17,7 @@ public:
         : tokens_(tokens), file_(file), source_(source) { scan_aliases(); }
 
     std::vector<StmtPtr> pending_extra_;
+    std::unordered_set<std::string> as_names_;
 
     ParseResult run() {
         ParseResult r;
@@ -63,6 +65,8 @@ private:
     static constexpr size_t kMaxExplainRefs = 256;
 
     void scan_aliases() {
+        for (size_t i = 0; i + 1 < tokens_.size(); ++i)
+            if (tokens_[i].type == TokenType::KW_AS && tokens_[i + 1].type == TokenType::IDENT) as_names_.insert(tokens_[i + 1].text);
         for (size_t i = 0; i + 3 < tokens_.size(); ++i) {
             if (tokens_[i].type != TokenType::KW_USING) continue;
             const TokenType d = tokens_[i + 1].type;
@@ -132,6 +136,12 @@ private:
             return current();
         }
         error(current(), "expected " + what + " but got '" + current().text + "'");
+        return current();
+    }
+    const Token& expect_close(const Token& opener, const std::string& label) {
+        if (check(TokenType::EXT)) return advance();
+        error(current(), "expected '::ext' but got '" + current().text + "'");
+        diags_.note("the " + label + " block that starts on line " + std::to_string(opener.line) + " is never closed with '::ext'");
         return current();
     }
     int cur_line() const { return current().line; }
@@ -229,14 +239,14 @@ private:
     }
 
     StmtPtr parse_import() {
-        Token inc = advance();  // #inc
+        Token inc = advance();
         if (!check(TokenType::IDENT)) {
             error(current(), "expected module name after '#inc'");
             return nullptr;
         }
         Token mod = advance();
         std::string module_name = mod.text;
-        std::string alias = module_name;  // default alias = module name
+        std::string alias = module_name;
         if (check(TokenType::KW_AS)) {
             advance();
             if (!check(TokenType::IDENT)) {
@@ -394,7 +404,6 @@ private:
         Token u = advance();
         if (check(TokenType::KW_INC) || check(TokenType::KW_CONNECT) || check(TokenType::KW_EXPLAIN))
             return parse_directive_alias(u, using_pos);
-        // using <expr> as <name>;
         ExprPtr e = parse_expr();
         if (!check(TokenType::KW_AS)) {
             error(current(), "expected 'as' after using-expression");
@@ -414,7 +423,7 @@ private:
     }
 
     StmtPtr parse_func() {
-        Token f = advance();  // func
+        Token f = advance();
         if (!check(TokenType::IDENT)) {
             error(current(), "expected function name after 'func'");
             return nullptr;
@@ -439,7 +448,7 @@ private:
         expect(TokenType::RPAREN, "')'");
         expect(TokenType::COLON, "':'");
         std::vector<StmtPtr> body = parse_block_body();
-        expect(TokenType::EXT, "'::ext'");
+        expect_close(f, "'func " + name.text + "'");
         auto s = make_stmt(StmtKind::FuncDecl, f);
         s->func_name = name.text;
         s->params = std::move(params);
@@ -514,7 +523,7 @@ private:
             methods.push_back({bare_name, mangled});
             pending_extra_.push_back(method);
         }
-        expect(TokenType::EXT, "'::ext'");
+        expect_close(c, "'class " + class_name + "'");
 
         auto ctor = make_stmt(StmtKind::FuncDecl, c);
         ctor->func_name = class_name;
@@ -580,7 +589,7 @@ private:
             if (check(TokenType::EXT)) advance();
             return nullptr;
         }
-        advance();  // catch
+        advance();
         if (!check(TokenType::IDENT)) {
             error(current(), "expected a name to bind the error to after 'catch'");
             return nullptr;
@@ -588,7 +597,7 @@ private:
         std::string catch_var = advance().text;
         expect(TokenType::COLON, "':'");
         std::vector<StmtPtr> catch_body = parse_block_body();
-        expect(TokenType::EXT, "'::ext'");
+        expect_close(t, "'try'");
         auto s = make_stmt(StmtKind::Try, t);
         s->body = std::move(try_body);
         s->catch_var = catch_var;
@@ -617,7 +626,7 @@ private:
                 break;
             }
         }
-        expect(TokenType::EXT, "'::ext'");
+        expect_close(i, "'if'");
         auto s = make_stmt(StmtKind::If, i);
         s->cond = cond;
         s->then_body = std::move(then_body);
@@ -631,7 +640,7 @@ private:
         ExprPtr cond = parse_expr();
         expect(TokenType::COLON, "':'");
         auto body = parse_block_body();
-        expect(TokenType::EXT, "'::ext'");
+        expect_close(w, "'while'");
         auto s = make_stmt(StmtKind::While, w);
         s->cond = cond;
         s->body = std::move(body);
@@ -665,7 +674,7 @@ private:
         }
         expect(TokenType::COLON, "':'");
         auto body = parse_block_body();
-        expect(TokenType::EXT, "'::ext'");
+        expect_close(f, "'for'");
         auto s = make_stmt(StmtKind::For, f);
         s->loop_var = lv.text;
         s->iterable = iter;
@@ -842,7 +851,7 @@ private:
                     args.push_back(parse_expr());
                     if (check(TokenType::COMMA)) {
                         advance();
-                        if (check(TokenType::RPAREN)) break;  // trailing comma
+                        if (check(TokenType::RPAREN)) break;
                     } else {
                         break;
                     }
@@ -856,7 +865,22 @@ private:
                 bool legacy_dot = check(TokenType::DOT);
                 Token accessor = advance();
                 if (legacy_dot) {
-                    warn(accessor, "'.' is the old CSy member access - use '::' instead (e.g. bc::out, not bc.out)");
+                    const bool is_module_name = e && e->kind == ExprKind::Ident && as_names_.count(e->name) > 0;
+                    const bool is_method_call = check(TokenType::IDENT) && peek(1).type == TokenType::LPAREN;
+                    if (is_method_call && !is_module_name) {
+                        const std::string method = current().text;
+                        const std::string object = (e && e->kind == ExprKind::Ident) ? e->name : std::string("value");
+                        std::string use;
+                        if (method == "add" || method == "append" || method == "push") use = "bc::push(" + object + ", item)";
+                        else if (method == "len" || method == "length" || method == "size") use = "bc::len(" + object + ")";
+                        else if (method == "sort") use = "bc::sort(" + object + ")";
+                        else if (method == "reverse") use = "bc::reverse(" + object + ")";
+                        warn(accessor, "values have no methods in CSy, so '" + object + "." + method + "(...)' will not work" +
+                                       (use.empty() ? std::string(" - call a function from the basic module instead, for example bc::push(items, x)")
+                                                    : " - use " + use + " instead"));
+                    } else {
+                        warn(accessor, "'.' is the old CSy member access - use '::' instead (e.g. bc::out, not bc.out)");
+                    }
                 }
                 if (!check(TokenType::IDENT)) {
                     error(current(), "expected member name after '::'");
@@ -979,7 +1003,7 @@ private:
             }
             default:
                 error(t, "expected an expression but got '" + t.text + "'");
-                advance();  // skip the bad token to make progress
+                advance();
                 return make_expr(ExprKind::None, t);
         }
     }
@@ -993,3 +1017,4 @@ ParseResult parse(const std::vector<Token>& tokens,
 }
 
 }
+

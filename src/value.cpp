@@ -1,5 +1,5 @@
 #include "value.hpp"
-#include "ir.hpp" // for func :3
+#include "ir.hpp"
 #include <sstream>
 #include <cmath>
 
@@ -106,3 +106,4 @@ static std::string display_impl(const Value& self, int depth) {
 }
 
 }
+

@@ -148,7 +148,6 @@ def check(table, template, report):
     return bad, len(violating), total_lines, empty, per_situation, got
 
 
-# hello!
 MAGIC, VERSION, HEADER = b"CCMT", 1, 36
 
 

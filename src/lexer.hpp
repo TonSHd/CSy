@@ -1,4 +1,3 @@
-// CSy Lexer - tokenizes CSy source code.
 #pragma once
 
 #include <string>
@@ -10,61 +9,61 @@ namespace csy {
 enum class TokenType {
     INT, FLOAT, STRING, IDENT,
 
-    KW_INC, // #inc
-    KW_CONNECT, // #connect
-    KW_EXPLAIN, // #explain
-    KW_FUNC, // func
-    KW_IF, // if
-    KW_ELIF, // elif
-    KW_ELSE, // else
-    KW_WHILE, // while
-    KW_FOR, // for
-    KW_IN, // in
-    KW_RT, // rt
-    KW_USING, // using
-    KW_AS, // as
-    KW_NONE, // none
-    KW_TRUE, // true
-    KW_FALSE, // false
-    KW_RANGE, // range
-    KW_THRU, // thru
-    KW_CLASS,  // class
-    KW_STOP, // stop
-    KW_SKIP, // skip
-    KW_EXTENDS, // extends
-    KW_TRY, // try
-    KW_CATCH, // catch
+    KW_INC,
+    KW_CONNECT,
+    KW_EXPLAIN,
+    KW_FUNC,
+    KW_IF,
+    KW_ELIF,
+    KW_ELSE,
+    KW_WHILE,
+    KW_FOR,
+    KW_IN,
+    KW_RT,
+    KW_USING,
+    KW_AS,
+    KW_NONE,
+    KW_TRUE,
+    KW_FALSE,
+    KW_RANGE,
+    KW_THRU,
+    KW_CLASS,
+    KW_STOP,
+    KW_SKIP,
+    KW_EXTENDS,
+    KW_TRY,
+    KW_CATCH,
 
-    SEMI, // ;
-    COLON, // :
-    DOT, // . (legacy)
-    DCOLON, // ::
-    COMMA, // ,
-    LBRACE, // {
-    RBRACE, // }
-    LPAREN, // (
-    RPAREN, // )
-    LBRACKET, // [
-    RBRACKET, // ]
-    EXT, // ::ext
+    SEMI,
+    COLON,
+    DOT,
+    DCOLON,
+    COMMA,
+    LBRACE,
+    RBRACE,
+    LPAREN,
+    RPAREN,
+    LBRACKET,
+    RBRACKET,
+    EXT,
 
-    ASSIGN, // =
-    PLUS, // +
-    MINUS, // -
-    STAR, // *
-    SLASH, // /
-    PERCENT, // %
-    PLUS_EQ, // +=
-    MINUS_EQ, // -=
-    GT, // >
-    LT, // <
-    GE, // >=
-    LE, // <=
-    EQ, // ==
-    NEQ, // !=
-    AND, // &&
-    OR, // ||
-    NOT, // !
+    ASSIGN,
+    PLUS,
+    MINUS,
+    STAR,
+    SLASH,
+    PERCENT,
+    PLUS_EQ,
+    MINUS_EQ,
+    GT,
+    LT,
+    GE,
+    LE,
+    EQ,
+    NEQ,
+    AND,
+    OR,
+    NOT,
 
     END_OF_FILE,
     NEWLINE,
@@ -115,3 +114,4 @@ std::string token_type_name(TokenType t);
 bool is_keyword(const std::string& word);
 
 }
+

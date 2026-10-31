@@ -2,12 +2,12 @@
 #include "object_file.hpp"
 #include "resource.hpp"
 #include "builtins_ext.hpp"
+
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <string>
 
-// This file was written by Claude, ChatGPT(Codex), CSy maintainer
 
 namespace csy {
 
@@ -52,7 +52,6 @@ public:
                 int idx = (int)ir_.functions.size();
                 ir_.functions.push_back(std::move(fn));
                 func_indices[s->func_name] = idx;
-                // Add as a global too so it can be referenced by name.
                 int gidx = ir_.add_global(s->func_name);
                 func_global_indices_[s->func_name] = gidx;
             }
@@ -123,7 +122,7 @@ private:
     const std::vector<std::pair<std::string,std::string>>& using_aliases_;
     const std::vector<std::string>& builtin_names_;
     std::unordered_map<std::string, int> func_global_indices_;
-    std::unordered_map<std::string, std::string> import_aliases_;  // alias -> module name
+    std::unordered_map<std::string, std::string> import_aliases_;
     std::unordered_map<std::string, std::unordered_set<std::string>> connected_aliases_;
     std::unordered_set<const Stmt*> toplevel_func_stmts_;
     std::vector<std::string> self_name_stack_;
@@ -246,7 +245,6 @@ private:
             for (const auto& name : fn.boxed_locals) {
                 auto it = fn.local_slots.find(name);
                 if (it != fn.local_slots.end()) {
-                    // Already holds a real value (a parameter) - wrap it in place.
                     int slot = it->second;
                     emit(fn, Op::LOAD_LOCAL, slot, 0, 0);
                     emit(fn, Op::MAKE_VEC, 1, 0, 0);
@@ -378,7 +376,7 @@ private:
                     collect_referenced_idents_expr(s->expr->value, order, seen);
                     auto& t = s->expr->target;
                     if (t && t->kind == ExprKind::Ident) {
-                        note_ref(t->name, order, seen);  // e.g. `count = ...;` capturing/mutating count
+                        note_ref(t->name, order, seen);
                     } else if (t && t->kind == ExprKind::VectorLiteral) {
                         for (const auto& el : t->elements)
                             if (el && el->kind == ExprKind::Ident) note_ref(el->name, order, seen);
@@ -586,14 +584,8 @@ private:
             case StmtKind::ExprStmt: {
                 at_stmt_top_ = true;
                 compile_expr(fn, s->expr, func_indices);
-                // Discard the result UNLESS the expression already leaves nothing
-                // on the stack (assignment, compound assignment). OUTPUT now
-                // always leaves its sink behind (so `o>a>b` can chain), so it
-                // no longer gets a special exemption here - it's popped the
-                // same as any other expression-statement result.
                 if (s->expr->kind == ExprKind::Assign ||
                     s->expr->kind == ExprKind::CompoundAssign) {
-                    // Assignment ops consume their RHS via STORE; nothing to discard.
                 } else {
                     emit(fn, Op::POP, 0, s->tok.line, s->tok.col);
                 }
@@ -601,20 +593,8 @@ private:
             }
             case StmtKind::FuncDecl: {
                 if (toplevel_func_stmts_.count(s.get())) {
-                    // Ordinary top-level function - already declared and
-                    // will be compiled in its own pass. Nothing to emit here.
                     break;
                 }
-                // Nested function declaration = a closure. Figure out what
-                // it needs from the enclosing function `fn` (its locals or
-                // its own upvalues - see collect_bound_names/
-                // collect_referenced_idents up top for why this recurses
-                // into nested-nested bodies too), build it as a real
-                // IRFunction, then emit code right here that captures those
-                // values and binds the resulting closure to `s->func_name`
-                // as an ordinary local (or global, if `fn` is <main>) -
-                // exactly like any other variable, so calling it later is
-                // just a normal Ident lookup.
                 std::unordered_set<std::string> bound;
                 for (const auto& p : s->params) bound.insert(p);
                 collect_bound_names(s->body, bound);
@@ -630,9 +610,9 @@ private:
                     nested.local_slots[s->params[i]] = i;
                 }
                 for (const auto& name : ref_order) {
-                    if (bound.count(name)) continue;  // own param/local - not free
+                    if (bound.count(name)) continue;
                     bool capturable = fn.local_slots.count(name) > 0 || fn.upvalue_slots.count(name) > 0;
-                    if (!capturable) continue;  // a global/builtin/toplevel func - resolves on its own
+                    if (!capturable) continue;
                     nested.upvalue_slots[name] = (int)nested.upvalue_names.size();
                     nested.upvalue_names.push_back(name);
                 }
@@ -640,19 +620,6 @@ private:
                 int nested_idx = (int)ir_.functions.size();
                 ir_.functions.push_back(std::move(nested));
 
-                // Emit the capture values, in order, from the ENCLOSING
-                // function's own locals/upvalues - then wrap them up.
-                // Local-sourced: plain LOAD_LOCAL already gets the right
-                // thing whether or not it's boxed - a boxed local's slot
-                // literally holds the box itself (see boxed_locals in
-                // compile_function_body), so this naturally shares that
-                // exact box (its Rc gets copied, not the contents cloned)
-                // with the new closure. Upvalue-sourced (this function is
-                // itself a closure relaying something further down):
-                // must use LOAD_UPVALUE_BOX (raw, unwrapped) rather than
-                // plain LOAD_UPVALUE (which auto-unwraps for ordinary
-                // reads) - otherwise the grandchild would end up capturing
-                // a stale copy of the value instead of the live cell.
                 for (const auto& name : ir_.functions[nested_idx].upvalue_names) {
                     auto lit = fn.local_slots.find(name);
                     if (lit != fn.local_slots.end()) {
@@ -664,13 +631,8 @@ private:
                 emit(fn, Op::MAKE_CLOSURE, nested_idx, s->tok.line, s->tok.col);
                 store_to_ident(fn, s->func_name, s->tok.line, s->tok.col);
 
-                // Now compile the nested function's own body, with its own
-                // name available for self-recursion via PUSH_SELF.
                 self_name_stack_.push_back(s->func_name);
                 {
-                    // A nested function is its own code object: a `stop`/`skip` in
-                    // it must never be patched into the enclosing function's loop,
-                    // and enclosing try-depth does not apply inside it.
                     std::vector<LoopCtx> saved_loops;
                     saved_loops.swap(loop_stack_);
                     const int saved_try_depth = try_depth_;
@@ -685,9 +647,8 @@ private:
             case StmtKind::If: {
                 compile_expr(fn, s->cond, func_indices);
                 int jmpf_pos = (int)fn.code.size();
-                emit(fn, Op::JMPF, 0, s->tok.line, s->tok.col);  // patched later
+                emit(fn, Op::JMPF, 0, s->tok.line, s->tok.col);
                 for (const auto& bs : s->then_body) compile_stmt(fn, bs, func_indices);
-                // Collect all JMP-to-end positions so we can patch them all at the end.
                 std::vector<int> jmps_to_end;
                 if (!s->elifs.empty() || !s->else_body.empty()) {
                     jmps_to_end.push_back((int)fn.code.size());
@@ -707,23 +668,22 @@ private:
                 if (!s->else_body.empty()) {
                     for (const auto& bs : s->else_body) compile_stmt(fn, bs, func_indices);
                 }
-                // Patch all the JMP-to-end instructions.
                 int end_pos = (int)fn.code.size();
                 for (int j : jmps_to_end) fn.code[j].arg = end_pos;
                 break;
             }
             case StmtKind::Try: {
                 int try_enter_pos = (int)fn.code.size();
-                emit(fn, Op::TRY_ENTER, 0, s->tok.line, s->tok.col);  // patched below
+                emit(fn, Op::TRY_ENTER, 0, s->tok.line, s->tok.col);
                 ++try_depth_;
                 for (const auto& bs : s->body) compile_stmt(fn, bs, func_indices);
                 --try_depth_;
                 emit(fn, Op::TRY_EXIT, 0, s->tok.line, s->tok.col);
                 int jmp_end_pos = (int)fn.code.size();
-                emit(fn, Op::JMP, 0, s->tok.line, s->tok.col);  // patched below
-                fn.code[try_enter_pos].arg = (int)fn.code.size();  // catch block starts here
-                store_to_ident(fn, s->catch_var, s->tok.line, s->tok.col);  // binds the error message
-                for (const auto& bs : s->then_body) compile_stmt(fn, bs, func_indices);  // catch body
+                emit(fn, Op::JMP, 0, s->tok.line, s->tok.col);
+                fn.code[try_enter_pos].arg = (int)fn.code.size();
+                store_to_ident(fn, s->catch_var, s->tok.line, s->tok.col);
+                for (const auto& bs : s->then_body) compile_stmt(fn, bs, func_indices);
                 fn.code[jmp_end_pos].arg = (int)fn.code.size();
                 break;
             }
@@ -743,15 +703,6 @@ private:
                 break;
             }
             case StmtKind::For: {
-                // for var in iterable:
-                //   body
-                //
-                // Lower to:
-                //   <iterable> -> store in iter_slot (or global if in <main>)
-                //   push 0 -> store in idx_slot
-                // cond:
-                //   load idx, load iter, call builtin "len", compare.
-                //   ...
                 bool is_main = (fn.name == "<main>");
                 auto load_var = [&](const std::string& name) {
                     if (is_main) {
@@ -781,10 +732,8 @@ private:
                 };
                 std::string iter_name = "$iter_" + s->loop_var;
                 std::string idx_name = "$idx_" + s->loop_var;
-                // Compile iterable, store in iter var.
                 const bool lazy_range = is_lazy_range(fn, s->iterable, func_indices);
                 if (lazy_range) {
-                    // iter var holds the (non-negative) iteration count itself.
                     compile_expr(fn, s->iterable->args[0], func_indices);
                     emit(fn, Op::CALL_NATIVE,
                          pack_native_call(ir_.builtin_index.at("__range_bound"), 1, s->tok),
@@ -793,21 +742,17 @@ private:
                     compile_expr(fn, s->iterable, func_indices);
                 }
                 store_var(iter_name);
-                // Init idx = 0.
                 emit(fn, Op::PUSH_INT, ir_.add_int(0), s->tok.line, s->tok.col);
                 store_var(idx_name);
-                // cond:
                 int cond_pos = (int)fn.code.size();
                 load_var(idx_name);
                 load_var(iter_name);
                 if (!lazy_range) {
-                    // len(iter) via a direct native call (no function-value wrapper)
                     emit(fn, Op::LEN, 0, s->tok.line, s->tok.col);
                 }
                 emit(fn, Op::LT, 0, s->tok.line, s->tok.col);
                 int jmpf_pos = (int)fn.code.size();
                 emit(fn, Op::JMPF, 0, s->tok.line, s->tok.col);
-                // body: loop_var = iter[idx]   (for a lazy range, iter[idx] == idx)
                 if (lazy_range) {
                     load_var(idx_name);
                 } else {
@@ -820,7 +765,6 @@ private:
                 for (const auto& bs : s->body) compile_stmt(fn, bs, func_indices);
                 LoopCtx ctx = loop_stack_.back();
                 loop_stack_.pop_back();
-                // idx++  (continue jumps here, not to cond_pos, so it still increments)
                 int incr_pos = (int)fn.code.size();
                 for (int p : ctx.continue_patches) fn.code[p].arg = incr_pos;
                 load_var(idx_name);
@@ -833,7 +777,7 @@ private:
                 break;
             }
             case StmtKind::Break: {
-                if (loop_stack_.empty()) break;  // semantic analysis already warned
+                if (loop_stack_.empty()) break;
                 emit_try_exits_for_jump(fn, s->tok.line, s->tok.col);
                 int p = (int)fn.code.size();
                 emit(fn, Op::JMP, 0, s->tok.line, s->tok.col);
@@ -841,7 +785,7 @@ private:
                 break;
             }
             case StmtKind::Continue: {
-                if (loop_stack_.empty()) break;  // semantic analysis already warned
+                if (loop_stack_.empty()) break;
                 emit_try_exits_for_jump(fn, s->tok.line, s->tok.col);
                 int p = (int)fn.code.size();
                 emit(fn, Op::JMP, 0, s->tok.line, s->tok.col);
@@ -862,10 +806,6 @@ private:
         }
     }
 
-    // Returns true if this binary expr with op `>` is actually the output operator.
-    // Two forms:
-    //   1. bc.out > value      (LHS is Member with name "out")
-    //   2. <alias> > value     (LHS is Ident matching a using-alias for "out")
     bool is_output_expr(const ExprPtr& e) {
         if (!e || e->kind != ExprKind::Binary || e->op != TokenType::GT) return false;
         if (e->left && e->left->kind == ExprKind::Member && e->left->name == "out") {
@@ -877,20 +817,10 @@ private:
                 if (p.first == name && p.second == "out") return true;
             }
         }
-        // Stream chaining: o>a>b>c parses as (((o>a)>b)>c) - the left side
-        // of an outer > can itself be an earlier link in the same chain,
-        // same shape as ostream's `<<` returning *this to chain off of.
         if (e->left && is_output_expr(e->left)) return true;
         return false;
     }
 
-    // Compiles a `sink > v1 > v2 > ... > vN` output chain. `e` is one GT
-    // link; `is_outermost` controls whether a trailing newline is printed
-    // (only the very last link in the chain gets one - the point of
-    // chaining is that everything lands on a single line, same as
-    // `std::cout << a << b << c`). Every OUTPUT leaves the sink behind on
-    // the stack so the next link (or the final statement-level POP) has
-    // something to consume.
     void compile_output_chain(IRFunction& fn, const ExprPtr& e,
                                const std::unordered_map<std::string, int>& func_indices,
                                bool is_outermost) {
@@ -898,9 +828,6 @@ private:
             is_output_expr(e->left)) {
             compile_output_chain(fn, e->left, func_indices, false);
         } else {
-            // Base case: e->left is just the sink marker (bc::out, or an
-            // alias for it) - it never needs evaluating as a real
-            // expression, it always just means "the out sink".
             emit(fn, Op::PUSH_SINK, ir_.add_str("out"), e->tok.line, e->tok.col);
         }
         compile_expr(fn, e->right, func_indices);
@@ -911,7 +838,7 @@ private:
                        const std::unordered_map<std::string, int>& func_indices) {
         if (!e) { emit(fn, Op::PUSH_NONE, 0, 0, 0); return; }
         bool was_stmt_top = at_stmt_top_;
-        at_stmt_top_ = false;  // nested sub-expressions are never "top level"
+        at_stmt_top_ = false;
         switch (e->kind) {
             case ExprKind::Int:
                 emit(fn, Op::PUSH_INT, ir_.add_int(e->int_val), e->tok.line, e->tok.col);
@@ -929,9 +856,6 @@ private:
                 emit(fn, Op::PUSH_NONE, 0, e->tok.line, e->tok.col);
                 break;
             case ExprKind::Ident: {
-                // Look up: local first, then this-or-enclosing closure's own
-                // name / captured upvalue, then function-as-global, then
-                // global var.
                 auto lit = fn.local_slots.find(e->name);
                 if (lit != fn.local_slots.end()) {
                     if (fn.boxed_locals.count(e->name)) {
@@ -944,43 +868,33 @@ private:
                 if (try_load_self_or_upvalue(fn, e->name, e->tok.line, e->tok.col)) {
                     break;
                 }
-                // Function?
                 auto fit = func_indices.find(e->name);
                 if (fit != func_indices.end()) {
                     emit(fn, Op::PUSH_FUNC, fit->second, e->tok.line, e->tok.col);
                     break;
                 }
-                // Global var.
                 auto git = ir_.global_index.find(e->name);
                 if (git != ir_.global_index.end()) {
                     emit(fn, Op::LOAD_GLOBAL, git->second, e->tok.line, e->tok.col);
                     break;
                 }
-                // Not declared anywhere - treat as forward reference of a new global.
-                // (For v1, this shouldn't happen because semantic analysis should catch it.
-                // We emit a load of a fresh global, which will yield None at runtime.)
                 int g = ir_.add_global(e->name);
                 emit(fn, Op::LOAD_GLOBAL, g, e->tok.line, e->tok.col);
                 break;
             }
             case ExprKind::Binary: {
-                // Special-case: `bc::out > value` (optionally chained:
-                // `bc::out > a > b > c`) is the OUTPUT operator.
                 if (e->op == TokenType::GT && was_stmt_top && is_output_expr(e)) {
                     compile_output_chain(fn, e, func_indices, true);
                     break;
                 }
-                // Short-circuit AND/OR
                 if (e->op == TokenType::AND) {
                     compile_expr(fn, e->left, func_indices);
                     int jmpr = (int)fn.code.size();
-                    emit(fn, Op::JMPR, 0, e->tok.line, e->tok.col);  // jump if true (keep on stack)
-                    // Left was false - push false, jump to end
+                    emit(fn, Op::JMPR, 0, e->tok.line, e->tok.col);
                     emit(fn, Op::PUSH_BOOL, 0, e->tok.line, e->tok.col);
                     int jend = (int)fn.code.size();
                     emit(fn, Op::JMP, 0, e->tok.line, e->tok.col);
                     fn.code[jmpr].arg = (int)fn.code.size();
-                    // Pop the truthy left value, eval right
                     emit(fn, Op::POP, 0, e->tok.line, e->tok.col);
                     compile_expr(fn, e->right, func_indices);
                     fn.code[jend].arg = (int)fn.code.size();
@@ -989,8 +903,7 @@ private:
                 if (e->op == TokenType::OR) {
                     compile_expr(fn, e->left, func_indices);
                     int jmpr = (int)fn.code.size();
-                    emit(fn, Op::JMPR, 0, e->tok.line, e->tok.col);  // jump if true (keep on stack)
-                    // Left was false - eval right
+                    emit(fn, Op::JMPR, 0, e->tok.line, e->tok.col);
                     compile_expr(fn, e->right, func_indices);
                     int jend = (int)fn.code.size();
                     emit(fn, Op::JMP, 0, e->tok.line, e->tok.col);
@@ -1025,8 +938,6 @@ private:
                 break;
             }
             case ExprKind::Assign: {
-                // x = value  - only valid as a statement (VarDecl handles it).
-                // As an expression (rare), we evaluate value and store to target.
                 compile_expr(fn, e->value, func_indices);
                 if (e->target && e->target->kind == ExprKind::Ident) {
                     store_to_ident(fn, e->target->name, e->tok.line, e->tok.col);
@@ -1111,38 +1022,29 @@ private:
                         std::string bname = builtin_key_for(e->callee->object, e->callee->name);
                         auto bit = ir_.builtin_index.find(bname);
                         if (bit == ir_.builtin_index.end()) {
-                            // Unknown - register it so it doesn't crash.
                             ir_.add_builtin(bname);
                             bit = ir_.builtin_index.find(bname);
                         }
                         for (const auto& a : e->args) compile_expr(fn, a, func_indices);
-                        // Pack builtin_idx and arg count: arg = idx * 1000 + nargs
                         if (!emit_inline_builtin(fn, bname, e->args.size(), e->tok)) {
                             int packed = pack_native_call(bit->second, e->args.size(), e->tok);
                             emit(fn, Op::CALL_NATIVE, packed, e->tok.line, e->tok.col);
                         }
                         break;
                     }
-                    // Instance method call: obj::method(args) desugars to
-                    // (obj["method"])(obj, args...) - the object is evaluated
-                    // once (via a scratch local) and passed as the implicit
-                    // first argument, conventionally named "me" in the method.
                     int tmp = alloc_local(fn, "$self" + std::to_string(++compound_tmp_counter_));
-                    compile_expr(fn, e->callee->object, func_indices);        // [obj]
-                    emit(fn, Op::STORE_LOCAL, tmp, e->tok.line, e->tok.col);  // []
-                    emit(fn, Op::LOAD_LOCAL, tmp, e->tok.line, e->tok.col);   // [obj]  (injected "me")
-                    for (const auto& a : e->args) compile_expr(fn, a, func_indices); // [obj, args...]
-                    emit(fn, Op::LOAD_LOCAL, tmp, e->tok.line, e->tok.col);   // [obj, args..., obj]
+                    compile_expr(fn, e->callee->object, func_indices);
+                    emit(fn, Op::STORE_LOCAL, tmp, e->tok.line, e->tok.col);
+                    emit(fn, Op::LOAD_LOCAL, tmp, e->tok.line, e->tok.col);
+                    for (const auto& a : e->args) compile_expr(fn, a, func_indices);
+                    emit(fn, Op::LOAD_LOCAL, tmp, e->tok.line, e->tok.col);
                     emit(fn, Op::PUSH_STR, ir_.add_str(e->callee->name), e->tok.line, e->tok.col);
-                    emit(fn, Op::GET_INDEX, 0, e->tok.line, e->tok.col);      // [obj, args..., funcval]
+                    emit(fn, Op::GET_INDEX, 0, e->tok.line, e->tok.col);
                     emit(fn, Op::CALL, (int)e->args.size() + 1, e->tok.line, e->tok.col);
                     break;
                 }
                 if (e->callee->kind == ExprKind::Ident) {
                     const std::string& name = e->callee->name;
-                    // A local variable (or captured upvalue / self-reference)
-                    // holding a closure takes priority - same shadowing rule
-                    // as a plain Ident read.
                     auto lit = fn.local_slots.find(name);
                     bool is_self_or_upvalue = (!self_name_stack_.empty() && self_name_stack_.back() == name) ||
                                                fn.upvalue_slots.count(name) > 0;
@@ -1160,7 +1062,6 @@ private:
                         emit(fn, Op::CALL, (int)e->args.size(), e->tok.line, e->tok.col);
                         break;
                     }
-                    // User function?
                     auto fit = func_indices.find(name);
                     if (fit != func_indices.end()) {
                         for (const auto& a : e->args) compile_expr(fn, a, func_indices);
@@ -1168,7 +1069,6 @@ private:
                         emit(fn, Op::CALL, (int)e->args.size(), e->tok.line, e->tok.col);
                         break;
                     }
-                    // Builtin?
                     auto bit = ir_.builtin_index.find(name);
                     if (bit != ir_.builtin_index.end()) {
                         for (const auto& a : e->args) compile_expr(fn, a, func_indices);
@@ -1178,10 +1078,6 @@ private:
                         }
                         break;
                     }
-                    // An existing global holding a callable - e.g. a closure
-                    // returned from another function and assigned here, or
-                    // any indirect reference to a function by variable name
-                    // rather than its literal top-level name.
                     auto git = ir_.global_index.find(name);
                     if (git != ir_.global_index.end()) {
                         for (const auto& a : e->args) compile_expr(fn, a, func_indices);
@@ -1189,13 +1085,9 @@ private:
                         emit(fn, Op::CALL, (int)e->args.size(), e->tok.line, e->tok.col);
                         break;
                     }
-                    // Unknown function - emit a runtime error marker.
-                    // (Semantic analyzer should have caught this.)
                     for (const auto& a : e->args) compile_expr(fn, a, func_indices);
                     emit(fn, Op::PUSH_NONE, 0, e->tok.line, e->tok.col);
                 } else {
-                    // Callee is some other computed expression (e.g. calling
-                    // the result of an index/dict lookup directly).
                     for (const auto& a : e->args) compile_expr(fn, a, func_indices);
                     compile_expr(fn, e->callee, func_indices);
                     emit(fn, Op::CALL, (int)e->args.size(), e->tok.line, e->tok.col);
@@ -1203,9 +1095,6 @@ private:
                 break;
             }
             case ExprKind::Member: {
-                // alias::out  → push a sink value.
-                // alias::<other> → push a builtin reference.
-                // obj::field (obj not an import alias) → dict get, obj["field"].
                 if (e->object && e->object->kind == ExprKind::Ident &&
                     connected_aliases_.count(e->object->name) &&
                     connected_aliases_[e->object->name].count(e->name)) {
@@ -1265,3 +1154,4 @@ CodegenResult generate(const Module& ast,
 }
 
 }
+

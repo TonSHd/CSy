@@ -66,6 +66,7 @@ bool resolve_project_inputs(const std::vector<std::string>& positional,
         const auto config_size = fs::file_size(config_path, size_error);
         if (size_error) {
             error = "cannot read project file '" + positional.front() + "'";
+            if (size_error == std::errc::no_such_file_or_directory) error += " (it does not exist here; 'csyc init' creates a new project in the current folder)";
             return false;
         }
         if (config_size > kMaxProjectConfigBytes) {
@@ -156,7 +157,7 @@ void read_lex_parse(const std::string& path, bool keep_tokens, Parsed& out) {
     for (const auto& stmt : out.unit.parsed.module.body) {
         if (stmt->kind != StmtKind::Connect) continue;
         fs::path dependency = fs::path(stmt->connect_path);
-        if (dependency.extension() != ".csy") continue;  // phase B reports it
+        if (dependency.extension() != ".csy") continue;
         out.deps.push_back((fs::path(path).parent_path() / dependency).string());
     }
 }
@@ -169,7 +170,7 @@ std::string canonical_path(const fs::path& p) {
     return (ec ? abs.lexically_normal() : real).string();
 }
 
-} // namespace
+}
 
 bool load_program_sources(const ProjectInputs& inputs,
                           std::vector<SourceUnit>& out,
@@ -300,3 +301,4 @@ bool load_program_sources(const ProjectInputs& inputs,
 }
 
 }
+

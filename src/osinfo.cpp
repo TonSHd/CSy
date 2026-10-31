@@ -67,7 +67,7 @@ Os detect_os() {
     Os os;
 #if defined(__linux__)
     os.kind = "linux";
-#elif defined(__APPLE__) // Fallback
+#elif defined(__APPLE__)
     os.kind = "macos";
 #elif defined(_WIN32)
     os.kind = "windows";
@@ -261,3 +261,4 @@ void ensure_c_compiler(const Os& os, bool assume_yes, bool dry_run) {
 
 }
 }
+

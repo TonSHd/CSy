@@ -14,7 +14,7 @@ struct Os {
 };
 
 Os detect_os();
-bool supported(const Os& os);   // only Linux for now
+bool supported(const Os& os);
 
 std::string find_in_path(const std::string& program);
 std::string find_c_compiler(std::string& name);
@@ -37,3 +37,4 @@ void ensure_c_compiler(const Os& os, bool assume_yes, bool dry_run);
 
 }
 }
+

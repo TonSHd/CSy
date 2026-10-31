@@ -9,5 +9,8 @@ void snappy_decompress(const unsigned char* in, size_t in_size, unsigned char* o
 
 void gzip_decompress(const unsigned char* in, size_t in_size, unsigned char* out, size_t out_size);
 
+void zstd_decompress(const unsigned char* in, size_t in_size, unsigned char* out, size_t out_size);
+
 }
 }
+

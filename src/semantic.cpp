@@ -1,4 +1,3 @@
-// Written by Claude
 #include "semantic.hpp"
 #include "resource.hpp"
 #include "suggest.hpp"
@@ -27,16 +26,6 @@ public:
                 error(s->tok, "namespace '" + alias + "' is already declared in this file");
             }
         }
-        // Pre-pass: collect top-level function names (with arity) and
-        // variable names in declaration order, warning on any collision
-        // instead of letting two things silently share one name.
-        //
-        // Class methods desugar to functions with mangled names like
-        // "$Dog$bark" - a collision there always means the *class* name
-        // itself also collided (since both instantiations register a
-        // constructor function under the plain class name), so mangled
-        // names are skipped here to avoid a confusing internal-looking
-        // warning on top of the clearer one the user actually caused.
         for (const auto& s : mod.body) {
             if (s->kind == StmtKind::Connect) {
                 auto inserted = connected_exports_.emplace(s->connect_alias,
@@ -60,10 +49,6 @@ public:
                 func_arity_[s->func_name] = (int)s->params.size();
             }
         }
-        // Pre-pass: collect module-level variable names so functions can reference them.
-        // This is a single-pass scan - assignments to identifiers at the top level
-        // create globals. (Assignments inside if/while/for at top level also count,
-        // but we do a simple linear scan for v1.)
         for (const auto& s : mod.body) {
             if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign) {
                 auto& target = s->expr->target;
@@ -78,7 +63,6 @@ public:
                     }
                     module_globals_.insert(target->name);
                 } else if (target && target->kind == ExprKind::VectorLiteral) {
-                    // [a, b] = ...; - destructuring, register each name.
                     for (const auto& el : target->elements) {
                         if (el && el->kind == ExprKind::Ident) {
                             module_globals_.insert(el->name);
@@ -87,9 +71,8 @@ public:
                 }
             }
         }
-        // Module-level scope (shared by all top-level statements).
         Scope module_scope;
-        module_scope.names = module_globals_;  // start with known globals
+        module_scope.names = module_globals_;
         for (const auto& s : mod.body) {
             visit_stmt(s, module_scope);
         }
@@ -97,15 +80,10 @@ public:
         return result_;
     }
 
-    // "nvidia" and "cuda" are the same real module under two names - both
-    // map to the "nv_"-prefixed builtins in gpu_nvidia.cpp.
     bool is_gpu_module(const std::string& module) {
         return module == "nvidia" || module == "cuda";
     }
 
-    // "tui"'s builtins live under a "tui_" prefix in tui.cpp, same
-    // reasoning as is_gpu_module above - tui::color and a hypothetical
-    // future bc::color shouldn't collide.
     bool is_tui_module(const std::string& module) {
         return module == "tui";
     }
@@ -118,12 +96,6 @@ public:
         return builtin_set_.count(n) > 0;
     }
 
-    // "nvidia"/"tui" builtins are registered in the VM under an "nv_"/
-    // "tui_" prefix (see gpu_nvidia.cpp / tui.cpp) so they don't collide
-    // with "basic"'s bare names - bc::matmul and nv::matmul are
-    // genuinely different functions, not aliases of each other. This
-    // maps a module + bare member name to what's actually in the
-    // registry.
     bool module_has_member(const std::string& module, const std::string& name) {
         if (module == "basic") return is_builtin_name(name);
         if (is_gpu_module(module)) return is_builtin_name("nv_" + name);
@@ -132,8 +104,6 @@ public:
         return false;
     }
 
-    // Did-you-mean candidates, scoped to one module, so a typo in
-    // `nv::` only ever suggests other `nv::` members, never `bc::` ones.
     std::vector<std::string> module_member_candidates(const std::string& module) {
         std::vector<std::string> out;
         for (const auto& n : builtin_names_) {
@@ -162,11 +132,8 @@ private:
     std::unordered_map<std::string, std::unordered_set<std::string>> connected_exports_;
     std::vector<std::pair<std::string, std::string>> using_aliases_;
     int loop_depth_ = 0;
-    std::vector<std::string> active_loop_vars_;   // loop variables of the loops enclosing the current statement
+    std::vector<std::string> active_loop_vars_;
 
-    // Lexically chained scope. A nested function or catch block used to copy the
-    // entire enclosing scope (O(globals) per function => quadratic on big
-    // projects); now it just points at its parent.
     struct Scope {
         std::unordered_set<std::string> names;
         const Scope* parent = nullptr;
@@ -182,8 +149,6 @@ private:
         result_.diags.error(t.file(), t.line, t.col, msg);
     }
 
-    // Visits a list of statements, warning once about anything after a statement
-    // that always leaves the block (rt / stop / skip): it can never run.
     void visit_block(const std::vector<StmtPtr>& body, Scope& scope) {
         bool terminated = false, warned = false;
         const char* by = "";
@@ -220,14 +185,11 @@ private:
         for (const auto& n : func_names_) all.push_back(n);
         for (const auto& n : import_aliases_) all.push_back(n);
         for (const auto& p : using_aliases_) all.push_back(p.first);
-        // Real builtin names, not a hand-maintained copy that drifts out
-        // of sync with what the VM actually registers.
         for (const auto& n : builtin_names_) all.push_back(n);
         return all;
     }
 
     void note_did_you_mean(const Token& t, const std::string& target, const Scope& local) {
-        // A name that a #connect exports is reachable only through its namespace: say so.
         std::vector<std::string> owners;
         for (const auto& kv : connected_exports_)
             if (kv.second.count(target)) owners.push_back(kv.first);
@@ -276,16 +238,15 @@ private:
             case StmtKind::DirectiveAlias:
                 break;
             case StmtKind::Using: {
-                // Validate that using_expr resolves to something known.
-                // For v1, only support `using <alias>.out as <name>` and similar simple forms.
                 if (s->using_expr && s->using_expr->kind == ExprKind::Member) {
                     const auto& obj = s->using_expr->object;
                     if (obj && obj->kind == ExprKind::Ident) {
-                        // OK - e.g. using bc.out as o;
                         auto module = alias_to_module_.find(obj->name);
                         if (module != alias_to_module_.end() &&
                             module->second == "basic" && s->using_expr->name == "matmul") {
                             warn(s->tok, "using basic.matmul is deprecated for performance-sensitive AI workloads; it remains supported, but use ai::matmul with packed f64_array buffers for new code");
+                        } else {
+                            visit_expr(s->using_expr, local);
                         }
                         using_aliases_.push_back({s->using_alias, s->using_expr->name});
                 using_alias_set_.insert(s->using_alias);
@@ -300,9 +261,6 @@ private:
                 break;
             }
             case StmtKind::VarDecl: {
-                // x = expr; - the LHS is an IdentExpr that creates a new var,
-                // or a VectorLiteral of Idents for destructuring: [a,b] = ...
-                // Visit RHS first (so RHS can't see the new name(s) yet).
                 if (s->expr && s->expr->kind == ExprKind::Assign) {
                     visit_expr(s->expr->value, local);
                     auto& target = s->expr->target;
@@ -333,23 +291,27 @@ private:
             }
             case StmtKind::ExprStmt:
                 visit_expr(s->expr, local);
+                if (s->expr && s->expr->kind == ExprKind::Binary) {
+                    const Expr* left_most = s->expr.get();
+                    bool only_comparisons = true;
+                    while (left_most && left_most->kind == ExprKind::Binary) {
+                        const TokenType o = left_most->op;
+                        if (o != TokenType::GT && o != TokenType::LT && o != TokenType::GE && o != TokenType::LE &&
+                            o != TokenType::EQ && o != TokenType::NEQ) { only_comparisons = false; break; }
+                        left_most = left_most->left.get();
+                    }
+                    if (only_comparisons && left_most && left_most->kind == ExprKind::Ident && left_most->name == "out" &&
+                        !local.count("out") && func_name_set_.count("out") == 0 && using_alias_set_.count("out") == 0) {
+                        warn(left_most->tok, "'out' on its own is just the print function, so this line compares it and prints nothing - "
+                                             "import the module ('#inc basic as bc;') and write bc::out>..., or alias it with 'using bc::out as o;'");
+                    }
+                }
                 break;
             case StmtKind::FuncDecl: {
-                // Nested function declarations become real closures: they
-                // can see everything the enclosing scope can see (locals,
-                // params, outer closures' captures), not just module
-                // globals. Register the function's own name too, so it's
-                // callable - including recursively from within itself -
-                // both here and by sibling statements that follow.
-                // (At the module level `local` already *is* the running
-                // module scope, so this is also correct - and unchanged in
-                // behavior - for ordinary top-level functions.)
                 local.insert(s->func_name);
                 Scope fn_scope;
                 fn_scope.parent = &local;
                 for (const auto& p : s->params) fn_scope.insert(p);
-                // `stop`/`skip` inside a function never refers to a loop that
-                // encloses the function's *definition*.
                 const int saved_loop_depth = loop_depth_;
                 loop_depth_ = 0;
                 std::vector<std::string> saved_loop_vars;
@@ -365,8 +327,6 @@ private:
                                  (literal_truthy(s->cond) ? "true" : "false") + " - one branch can never run");
                 }
                 visit_expr(s->cond, local);
-                // Branch bodies share the parent scope (vars declared in a branch
-                // leak to subsequent branches - v1 simplicity).
                 visit_block(s->then_body, local);
                 for (const auto& el : s->elifs) {
                     visit_expr(el.first, local);
@@ -412,7 +372,6 @@ private:
                 break;
             case StmtKind::Try: {
                 visit_block(s->body, local);
-                // catch_var is only bound within the catch block.
                 Scope catch_scope;
                 catch_scope.parent = &local;
                 catch_scope.insert(s->catch_var);
@@ -427,8 +386,6 @@ private:
 
     void visit_expr(const ExprPtr& e, const Scope& local) {
         if (!e) return;
-        // Note: `local` passed by const ref - for VarDecl, the parent visit_stmt
-        // handles the actual scope mutation.
         switch (e->kind) {
             case ExprKind::Int:
             case ExprKind::Float:
@@ -437,7 +394,6 @@ private:
             case ExprKind::None:
                 break;
             case ExprKind::Ident: {
-                // Check if known.
                 bool known = local.count(e->name) ||
                              is_builtin_name(e->name) ||
                              func_name_set_.count(e->name) != 0 ||
@@ -464,12 +420,8 @@ private:
                 break;
             case ExprKind::Assign: {
                 visit_expr(e->value, local);
-                // Target can be Ident, Member, or Index.
                 if (e->target) {
                     if (e->target->kind == ExprKind::Ident) {
-                        // Implicit declaration - add to scope.
-                        // (We don't mutate the caller's scope here, but we treat
-                        //  it as known going forward in this expression.)
                         const_cast<Scope&>(local).insert(e->target->name);
                     } else {
                         visit_expr(e->target, local);
@@ -483,11 +435,6 @@ private:
                 break;
             case ExprKind::Call: {
                 visit_expr(e->callee, local);
-                // Arity check - scoped deliberately to plain `name(args)`
-                // calls. Instance method calls (`obj::method(args)`) auto
-                // -inject the instance as an implicit first argument the
-                // user never writes, so naively comparing arg counts there
-                // would misfire; that shape is skipped here on purpose.
                 if (e->callee && e->callee->kind == ExprKind::Ident) {
                     auto ait = func_arity_.find(e->callee->name);
                     if (ait != func_arity_.end() && ait->second != (int)e->args.size()) {
@@ -503,10 +450,6 @@ private:
             }
             case ExprKind::Member:
                 visit_expr(e->object, local);
-                // alias::name - validate against the real builtin list if the
-                // object is a genuine `#inc` alias. Anything else (obj::field)
-                // is dict/instance access on a runtime value - nothing to
-                // statically check, so no warning.
                 if (e->object && e->object->kind == ExprKind::Ident) {
                     const std::string& mod = e->object->name;
                     auto connected = connected_exports_.find(mod);
@@ -537,7 +480,9 @@ private:
                         if (!module_has_member(modname, e->name)) {
                             auto candidates = module_member_candidates(modname);
                             auto suggestion = did_you_mean(e->name, candidates);
-                            warn(e->tok, "module '" + modname + "' has no member '" + e->name + "'");
+                            const bool known_module = modname == "basic" || is_gpu_module(modname) || is_tui_module(modname) || is_ai_module(modname);
+                            if (known_module) error(e->tok, "module '" + modname + "' has no member '" + e->name + "'");
+                            else warn(e->tok, "module '" + modname + "' has no member '" + e->name + "'");
                             if (!suggestion.empty()) result_.diags.note(suggestion);
                         }
                     }
@@ -571,4 +516,5 @@ SemanticResult analyze(const Module& mod, const std::string& source,
     return a.run(mod);
 }
 
-} // namespace csy
+}
+

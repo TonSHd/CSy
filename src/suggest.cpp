@@ -30,7 +30,6 @@ std::vector<std::string> suggest(const std::string& target,
     for (const auto& c : candidates) {
         if (c.empty()) continue;
         int d = edit_distance(target, c);
-        // Bonus: if it's a substring or prefix match, treat distance as smaller.
         if (c.find(target) != std::string::npos || target.find(c) != std::string::npos) {
             d = std::max(0, d - 1);
         }
@@ -71,3 +70,4 @@ std::string did_you_mean(const std::string& target,
 }
 
 }
+

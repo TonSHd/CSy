@@ -38,7 +38,6 @@ private:
     std::unordered_map<std::string, BuiltinFn> builtins_;
     std::vector<std::string> builtin_names_ordered_;
 
-    // Per-frame state.
     struct Frame {
         IRFunction* fn;
         std::vector<Value> locals;
@@ -60,6 +59,7 @@ private:
     std::vector<Value> str_cache_;
     std::vector<Value> char_cache_;
     std::string error_context_;
+    int error_line_ = 0;
     bool stdout_tty_ = false;
     std::vector<Rc<Function>> user_func_cache_;
     std::vector<Rc<Function>> builtin_func_cache_;
@@ -81,3 +81,4 @@ private:
 };
 
 }
+

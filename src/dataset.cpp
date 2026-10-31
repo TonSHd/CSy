@@ -1,5 +1,5 @@
 #include "dataset.hpp"
-
+#include "csv.hpp"
 #include "dataio.hpp"
 #include "json.hpp"
 #include "parquet.hpp"
@@ -556,6 +556,35 @@ Value fn_save_parquet(std::vector<Value>& a) {
     return Value::make_bool(true);
 }
 
+char csv_default_delimiter(const std::string& path) { return extension_of(path) == ".tsv" ? '\t' : ','; }
+
+const Value* csv_options_value(const std::vector<Value>& a, size_t index, const char* who) {
+    if (a.size() <= index || a[index].type == Value::None) return nullptr;
+    if (a[index].type != Value::Dict) fail(std::string(who) + ": options must be a dict");
+    return &a[index];
+}
+
+Value fn_load_csv(std::vector<Value>& a) {
+    const std::string& path = need_path(a, "load_csv", "(path[, options])");
+    if (a.size() > 2) fail("load_csv expects (path[, options])");
+    const csv::Options options = csv::options_from(csv_options_value(a, 1, "load_csv"), "load_csv", csv_default_delimiter(path));
+    return csv::read(path, options);
+}
+
+Value fn_save_csv(std::vector<Value>& a) {
+    const std::string& path = need_path(a, "save_csv", "(path, table[, options])");
+    if (a.size() < 2 || a.size() > 3) fail("save_csv expects (path, table[, options])");
+    char delimiter = csv_default_delimiter(path);
+    if (const Value* o = csv_options_value(a, 2, "save_csv")) {
+        for (const auto& kv : *o->dict_val) {
+            if (kv.first != "delimiter") fail("save_csv: unknown option '" + kv.first + "' (known options: delimiter)");
+        }
+        delimiter = csv::options_from(o, "save_csv", delimiter).delimiter;
+    }
+    csv::write(path, a[1], delimiter);
+    return Value::make_bool(true);
+}
+
 Value fn_load_text(std::vector<Value>& a) {
     const std::string& path = need_path(a, "load_text", "(path)");
     if (a.size() != 1) fail("load_text expects (path)");
@@ -615,6 +644,7 @@ Value fn_load_dataset(std::vector<Value>& a) {
     if (ext == ".jsonl" || ext == ".ndjson") return fn_load_jsonl(a);
     if (ext == ".json") return fn_load_json(a);
     if (ext == ".bin") return fn_load_bin(a);
+    if (ext == ".csv" || ext == ".tsv") return fn_load_csv(a);
     return fn_load_text(a);
 }
 
@@ -625,6 +655,7 @@ Value fn_save_dataset(std::vector<Value>& a) {
     if (ext == ".jsonl" || ext == ".ndjson") return fn_save_jsonl(a);
     if (ext == ".json") return fn_save_json(a);
     if (ext == ".bin") return fn_save_bin(a);
+    if (ext == ".csv" || ext == ".tsv") return fn_save_csv(a);
     return fn_save_text(a);
 }
 
@@ -1092,6 +1123,37 @@ private:
     size_t lines_ = 0;
 };
 
+class CsvStream : public DatasetReader {
+public:
+    CsvStream(const std::string& path, const csv::Options& options) : path_(path), reader_(path, options) {}
+
+    Value next(long long n) override { return reader_.next(n); }
+    void reset() override { reader_.reset(); }
+
+    Value info() override {
+        std::vector<Value> names;
+        for (const std::string& name : reader_.names()) names.push_back(Value::make_str(name));
+        return make_info({{"format", Value::make_str("csv")}, {"path", Value::make_str(path_)},
+                          {"rows_read", Value::make_int(reader_.rows_read())}, {"names", Value::make_vec(std::move(names))}});
+    }
+
+private:
+    std::string path_;
+    csv::Reader reader_;
+};
+
+class CsvSink : public DatasetWriter {
+public:
+    CsvSink(const std::string& path, char delimiter) : path_(path), writer_(path, delimiter) {}
+    void append(const Value& batch) override { writer_.append(batch); }
+    void finish() override { writer_.finish(); }
+    const std::string& path() const override { return path_; }
+
+private:
+    std::string path_;
+    csv::Writer writer_;
+};
+
 class ParquetSink : public DatasetWriter {
 public:
     explicit ParquetSink(const std::string& path) : path_(path), writer_(path, true) {}
@@ -1246,6 +1308,9 @@ Value fn_open_dataset(std::vector<Value>& a) {
             }
         }
         reader.reset(new ParquetStream(path, ro));
+    } else if (ext == ".csv" || ext == ".tsv") {
+        options_arg(a, 1, "open_dataset", {"delimiter", "header", "columns", "types"});
+        reader.reset(new CsvStream(path, csv::options_from(csv_options_value(a, 1, "open_dataset"), "open_dataset", csv_default_delimiter(path))));
     } else if (ext == ".jsonl" || ext == ".ndjson") {
         options_arg(a, 1, "open_dataset", {});
         reader.reset(new JsonlReader(path));
@@ -1326,6 +1391,9 @@ Value fn_create_dataset(std::vector<Value>& a) {
     if (ext == ".parquet" || ext == ".pq") {
         options_arg(a, 1, "create_dataset", {});
         writer.reset(new ParquetSink(path));
+    } else if (ext == ".csv" || ext == ".tsv") {
+        options_arg(a, 1, "create_dataset", {"delimiter"});
+        writer.reset(new CsvSink(path, csv::options_from(csv_options_value(a, 1, "create_dataset"), "create_dataset", csv_default_delimiter(path)).delimiter));
     } else if (ext == ".jsonl" || ext == ".ndjson") {
         options_arg(a, 1, "create_dataset", {});
         writer.reset(new JsonlWriter(path));
@@ -1402,6 +1470,8 @@ void register_dataset_builtins(VM& vm) {
     add("save_jsonl", fn_save_jsonl);
     add("load_parquet", fn_load_parquet);
     add("save_parquet", fn_save_parquet);
+    add("load_csv", fn_load_csv);
+    add("save_csv", fn_save_csv);
     add("load_bin", fn_load_bin);
     add("save_bin", fn_save_bin);
     add("load_bin_raw", fn_load_bin_raw);
@@ -1421,3 +1491,4 @@ void register_dataset_builtins(VM& vm) {
 }
 
 }
+

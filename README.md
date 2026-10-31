@@ -30,7 +30,7 @@ Then you can run
 
 ## BUT WAIT!
 
-if you want "The Cooler Compiler" too. You need to put a file named "ccm_table.bin" into build/ first before running ./csyc install
+if you want "The Cooler Compiler" too, `csyc install` needs the file `ccm_table.bin` next to the `csyc` you built. It is in the repository root, so a `make` build already has it. If you built with CMake, `csyc` is in `build/`, so run `cp ccm_table.bin build/` first.
 
 `csyc install` puts csyc in `/usr/bin` and the Cooler Compiler table in `/usr/share/csyc`.
 CMake and the tarball's `install.sh` use `/usr` too. If an older `csyc` sits earlier on
@@ -102,14 +102,14 @@ Other things CSy has that are easy to miss:
 - classes with inheritance: `class Dog(name) extends Animal(name):`
 - error handling with `try` and `catch e:`
 - several files in one program with `#connect "lib/math.csy";`
-- loading and saving AI datasets: JSON, JSONL, Parquet, `.bin` tensors and text files (`bc::load_dataset`, `bc::save_dataset`)
+- loading and saving AI datasets: JSON, JSONL, Parquet, CSV, `.bin` tensors and text files (`bc::load_dataset`, `bc::save_dataset`)
 - the Cooler Compiler, which stays off until you run `csyc enable ccm`
 
 One thing that trips people: printing a comparison needs parentheses.
 `o>(x == 5);` prints the result, `o>x == 5;` prints nothing.
 
 You can learn everything including features in our learning document in CSY_SYNTAX_REFERENCE.md!
-CSy was still in early version (1.0.0) so you might encounter weird stuff.
+CSy was still in early version (1.1.0) so you might encounter weird stuff.
 But don't just ignore it! Tell us in issues
 
 ## Warnings
@@ -119,9 +119,13 @@ This language was terrible at some stuff (and i mean it)
 
 it was mostly for Machine Learning
 
-## AI Contribution
+## AI Assisted
 
 ChatGPT, Claude, Z.ai(GLM), Deepseek, Grok
+
+The AI tools are carefully managed, and their outputs are reviewed and monitored.
+
+The final decisions about what goes into CSy remain under human direction.
 
 Right now.. CSy is Linux only.
 

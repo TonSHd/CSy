@@ -17,3 +17,4 @@ std::string did_you_mean(const std::string& target,
                          const std::vector<std::string>& candidates);
 
 }
+

@@ -44,7 +44,7 @@ enum class Op : uint8_t {
     JMP,
     JMPF,
     JMPR,
-    CALL, // func
+    CALL,
     RET,
     CALL_NATIVE,
     HALT,
@@ -54,7 +54,7 @@ enum class Op : uint8_t {
     Q_BIN_STORE,
     Q_BIN_JMPF,
     Q_CMP_JMPF,
-    Q_GETIDX, // load a load b, get index and push element
+    Q_GETIDX,
 };
 
 struct Instr {
@@ -132,3 +132,4 @@ struct IRModule {
 std::string disassemble(const IRModule& mod);
 
 }
+

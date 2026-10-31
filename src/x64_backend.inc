@@ -1,10 +1,7 @@
-// CSy's own x86-64 backend
-// Written by Claude, ChatGPT(codex), CSy maintainer
 
 #if defined(__x86_64__) && defined(__linux__)
 #define CSY_HAVE_X64_BACKEND 1
 
-// Same encoding as sig_code() in the library loader: 2 bits per parameter.
 static uint32_t x64_sig_code(const std::string& sig) {
     uint32_t code = 0;
     for (size_t i = 0; i < sig.size(); i++) {
@@ -21,7 +18,6 @@ enum Reg { RAX = 0, RCX = 1, RDX = 2, RBX = 3, RSP = 4, RBP = 5, RSI = 6, RDI = 
 enum Cond { CC_O = 0x0, CC_B = 0x2, CC_AE = 0x3, CC_E = 0x4, CC_NE = 0x5, CC_BE = 0x6, CC_A = 0x7,
             CC_S = 0x8, CC_NS = 0x9, CC_P = 0xA, CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF };
 
-// Helpers reachable from generated code. The order is part of the image format.
 enum Helper {
     H_SIN, H_COS, H_TAN, H_ASIN, H_ACOS, H_ATAN, H_SQRT, H_EXP, H_LOG, H_LOG2, H_LOG10,
     H_FLOOR, H_CEIL, H_ROUND, H_FABS, H_SIGN, H_TANH, H_SIGMOID, H_RELU, H_SIGMOID_D, H_RELU_D, H_TANH_D,
@@ -56,7 +52,10 @@ static double h_atan2(double a, double b) { return std::atan2(a, b); }
 static double h_pow(double a, double b) { return std::pow(a, b); }
 static double h_fmax(double a, double b) { return std::fmax(a, b); }
 static double h_fmin(double a, double b) { return std::fmin(a, b); }
-static double h_clamp(double v, double lo, double hi) { return std::fmax(lo, std::fmin(v, hi)); }
+static double h_clamp(double v, double lo, double hi) {
+    if (std::isnan(v) || std::isnan(lo) || std::isnan(hi)) return std::numeric_limits<double>::quiet_NaN();
+    return std::fmax(lo, std::fmin(v, hi));
+}
 static long long h_bound_f(double d) {
     if (!(d > 0.0)) return 0;
     if (d >= 9.2e18) return LLONG_MAX;
@@ -74,8 +73,6 @@ inline void* helper_address(int id) {
     return table[id];
 }
 
-// Multiplier and shift for signed division by a constant d >= 2 (Hacker's Delight, 64-bit);
-// verified against the hardware divide on 9 million inputs including the extremes.
 struct DivMagic { int64_t multiplier; int shift; };
 inline DivMagic div_magic_for(int64_t d) {
     const uint64_t two63 = 1ULL << 63;
@@ -94,7 +91,6 @@ inline DivMagic div_magic_for(int64_t d) {
     return {(int64_t)(q2 + 1), p - 64};
 }
 
-// ---------------------------------------------------------------- assembler
 class Asm {
 public:
     std::vector<uint8_t> code;
@@ -118,13 +114,12 @@ public:
         if (r != 0x40 || force) b(r);
     }
     void modrm_rr(int reg, int rm) { b((uint8_t)(0xC0 | ((reg & 7) << 3) | (rm & 7))); }
-    void modrm_mem(int reg, int base, int32_t disp) {   // [base + disp32]
+    void modrm_mem(int reg, int base, int32_t disp) {
         b((uint8_t)(0x80 | ((reg & 7) << 3) | ((base & 7) == 4 ? 4 : (base & 7))));
         if ((base & 7) == 4) b(0x24);
         d32(disp);
     }
 
-    // integer
     void mov_rr(int dst, int src) { rex(true, src, dst); b(0x89); modrm_rr(src, dst); }
     void mov_ri(int dst, int64_t imm) {
         if (imm >= INT32_MIN && imm <= INT32_MAX) { rex(true, 0, dst); b(0xC7); modrm_rr(0, dst); d32((int32_t)imm); }
@@ -135,7 +130,7 @@ public:
     void mov_m32_imm(int base, int32_t disp, int32_t imm) { rex(false, 0, base); b(0xC7); modrm_mem(0, base, disp); d32(imm); }
     void mov_m32r(int base, int32_t disp, int src) { rex(false, src, base); b(0x89); modrm_mem(src, base, disp); }
     void cmp_m32_imm8(int base, int32_t disp, int8_t imm) { rex(false, 0, base); b(0x83); modrm_mem(7, base, disp); b((uint8_t)imm); }
-    void alu_rr(uint8_t opcode, int dst, int src) { rex(true, src, dst); b(opcode); modrm_rr(src, dst); }   // 01 add,29 sub,39 cmp,31 xor,85 test
+    void alu_rr(uint8_t opcode, int dst, int src) { rex(true, src, dst); b(opcode); modrm_rr(src, dst); }
     void alu_ri(int ext, int dst, int32_t imm) { rex(true, 0, dst); b(0x81); modrm_rr(ext, dst); d32(imm); }
     void cmp_rm(int reg, int base, int32_t disp) { rex(true, reg, base); b(0x3B); modrm_mem(reg, base, disp); }
     void imul_rr(int dst, int src) { rex(true, dst, src); b(0x0F); b(0xAF); modrm_rr(dst, src); }
@@ -143,8 +138,8 @@ public:
     void idiv_r(int r) { rex(true, 0, r); b(0xF7); modrm_rr(7, r); }
     void neg_r(int r) { rex(true, 0, r); b(0xF7); modrm_rr(3, r); }
     void cqo() { b(0x48); b(0x99); }
-    void shift_ri(int ext, int r, uint8_t n) { rex(true, 0, r); b(0xC1); modrm_rr(ext, r); b(n); }   // 4 shl, 5 shr, 7 sar
-    void imul1(int r) { rex(true, 0, r); b(0xF7); modrm_rr(5, r); }                                  // rdx:rax = rax * r (signed)
+    void shift_ri(int ext, int r, uint8_t n) { rex(true, 0, r); b(0xC1); modrm_rr(ext, r); b(n); }
+    void imul1(int r) { rex(true, 0, r); b(0xF7); modrm_rr(5, r); }
     void sqrtsd(int d, int s) { sse_rr(0xF2, 0x51, d, s); }
     void andpd(int d, int s) { sse_rr(0x66, 0x54, d, s); }
     void inc_m(int base, int32_t disp) { rex(true, 0, base); b(0xFF); modrm_mem(0, base, disp); }
@@ -156,7 +151,7 @@ public:
     void push_m(int base, int32_t disp) { rex(false, 0, base); b(0xFF); modrm_mem(6, base, disp); }
     void ret() { b(0xC3); }
     void leave() { b(0xC9); }
-    void call_got(int slot, size_t got_base_pos) {   // call [rip + disp32] -> table slot
+    void call_got(int slot, size_t got_base_pos) {
         b(0xFF); b(0x15);
         const int64_t target = (int64_t)(got_base_pos + (size_t)slot * 8);
         d32((int32_t)(target - (int64_t)(code.size() + 4)));
@@ -165,12 +160,10 @@ public:
     void jcc(int cc, int l) { b(0x0F); b((uint8_t)(0x80 | cc)); ref(l); }
     void call(int l) { b(0xE8); ref(l); }
 
-    // SSE2 scalar double
     void sse_rr(uint8_t prefix, uint8_t op, int dst, int src) { b(prefix); rex(false, dst, src); b(0x0F); b(op); modrm_rr(dst, src); }
     void sse_rm(uint8_t prefix, uint8_t op, int xmm, int base, int32_t disp) { b(prefix); rex(false, xmm, base); b(0x0F); b(op); modrm_mem(xmm, base, disp); }
     void movsd_load(int xmm, int base, int32_t disp) { sse_rm(0xF2, 0x10, xmm, base, disp); }
     void movsd_store(int base, int32_t disp, int xmm) { sse_rm(0xF2, 0x11, xmm, base, disp); }
-    // xmm <-> [base + index*8]; base must not be rbp/r13 and index must not be rsp/r12 (never the case here)
     void sse_idx(uint8_t op, int xmm, int base, int index) {
         b(0xF2);
         const uint8_t r = (uint8_t)(0x40 | (((xmm >> 3) & 1) << 2) | (((index >> 3) & 1) << 1) | ((base >> 3) & 1));
@@ -179,7 +172,6 @@ public:
         b((uint8_t)(0x04 | ((xmm & 7) << 3)));
         b((uint8_t)(0xC0 | ((index & 7) << 3) | (base & 7)));
     }
-    // packed doubles: movupd xmm <-> [base + index*8 + disp32] (same register restrictions as sse_idx)
     void sse_idx_disp(uint8_t op, int xmm, int base, int index, int32_t disp) {
         b(0x66);
         const uint8_t r = (uint8_t)(0x40 | (((xmm >> 3) & 1) << 2) | (((index >> 3) & 1) << 1) | ((base >> 3) & 1));
@@ -206,9 +198,6 @@ public:
     void movapd(int d, int s) { sse_rr(0x66, 0x28, d, s); }
     void movq_xr(int xmm, int r) { b(0x66); rex(true, xmm, r); b(0x0F); b(0x6E); modrm_rr(xmm, r); }
     void movq_rx(int r, int xmm) { b(0x66); rex(true, xmm, r); b(0x0F); b(0x7E); modrm_rr(xmm, r); }
-    // cvtsi2sd writes only the low half of its destination, so it would depend on whatever the
-    // register held before (a long false dependency chain through loops); zeroing it first
-    // is the usual idiom and costs nothing.
     void cvtsi2sd(int xmm, int r) { xorpd(xmm, xmm); b(0xF2); rex(true, xmm, r); b(0x0F); b(0x2A); modrm_rr(xmm, r); }
     void cvttsd2si(int r, int xmm) { b(0xF2); rex(true, r, xmm); b(0x0F); b(0x2C); modrm_rr(r, xmm); }
 
@@ -232,19 +221,18 @@ struct Entry {
     bool ret_float = false;
 };
 struct Image {
-    std::string blob;            // [helper table][code]; the table is filled in by the loader
+    std::string blob;
     std::vector<Entry> entries;
 };
 
-constexpr uint32_t kMaxNativeDepth = 20000;   // same limit as the C path
+constexpr uint32_t kMaxNativeDepth = 20000;
 
-} // namespace x64
+}
 
 class X64CodeGen {
 public:
     explicit X64CodeGen(InstMap& insts) : fns_(insts) {}
 
-    // Returns false (with `why`) if any construct is outside what this emitter handles.
     bool generate(const std::vector<std::string>& emit_order, const std::vector<std::string>& exported,
                   x64::Image& image, std::string& why) {
         using namespace x64;
@@ -269,9 +257,6 @@ public:
         return true;
     }
 
-    // Per function instance: how many loops got a vector fast path, and how many loops are neither a
-    // vector loop nor contain one (counted loops that the own backend runs no faster than before). The
-    // backend choice in native_jit.cpp uses this to decide which functions are worth running here.
     struct LoopStat { int vector_loops = 0; int other_loops = 0; };
     const std::unordered_map<std::string, LoopStat>& loop_stats() const { return loop_stats_; }
 
@@ -280,7 +265,7 @@ private:
     InstMap& fns_;
     std::unordered_map<std::string, LoopStat> loop_stats_;
     LoopStat* cur_stat_ = nullptr;
-    std::vector<bool> loop_has_vec_;     // one entry per open loop: is it, or does it contain, a vector loop
+    std::vector<bool> loop_has_vec_;
     void loop_enter() { loop_has_vec_.push_back(false); }
     void loop_leave(bool is_vec) {
         const bool vec = is_vec || (!loop_has_vec_.empty() && loop_has_vec_.back());
@@ -293,31 +278,25 @@ private:
     std::unordered_map<std::string, int> fn_label_;
     std::string why_;
 
-    // ---- per-function state
     struct Loop { int cont; int brk; };
-    // Every scalar, array pointer/length and loop counter has a home slot in the frame; the
-    // hottest ones also live in a register for the whole function. Pool registers are callee-
-    // saved in CSy's internal convention (a function saves the ones it uses), and are spilled
-    // to their home slots around libm helper calls, which follow the C ABI.
     struct Var { int slot = 0; int reg = -1; bool is_float = false; };
     static constexpr int kIntPool[8] = {x64::RBX, x64::R15, x64::RSI, x64::RDI, x64::R8, x64::R9, x64::R10, x64::R11};
-    // A pool register is identified by its file and number: xmm8 and r8 are different registers.
     static int enc_reg(bool is_float, int r) { return r | (is_float ? 256 : 0); }
     static bool int_reg_clobbered_by_c(int r) { return r == x64::RSI || r == x64::RDI || (r >= 8 && r <= 11); }
     struct Ctx {
         FnInfo* fn = nullptr;
-        std::unordered_map<std::string, Var> vars;   // variable, "len_<array>", "@c<n>"/"@b<n>" loop counters
-        std::unordered_map<std::string, int> tag_slots; // runtime int/float tags for mixed locals
+        std::unordered_map<std::string, Var> vars;
+        std::unordered_map<std::string, int> tag_slots;
         std::unordered_map<const Expr*, int> call_tag_slots;
         std::unordered_map<const Stmt*, int> loop_ids;
-        std::vector<int> used_regs;                  // pool registers this function uses (saved/restored)
-        std::unordered_map<int, int> save_slot;      // register -> frame slot holding the caller's value
+        std::vector<int> used_regs;
+        std::unordered_map<int, int> save_slot;
         int epilogue = -1;
-        int inline_exit = -1;                        // >= 0 while emitting an inlined callee body
-        std::vector<const std::unordered_map<std::string, Var>*> outer_scopes;   // callers' variables while inlining
+        int inline_exit = -1;
+        std::vector<const std::unordered_map<std::string, Var>*> outer_scopes;
         int inline_expansions = 0;
-        int next_slot = 1;                            // slot 1 (rbp-8) is the scratch return tag
-        int depth = 0;                                // bytes pushed below the frame
+        int next_slot = 1;
+        int depth = 0;
         int ret_zero = -1, err_div = -1, err_ovf = -1, err_idx = -1;
         std::vector<Loop> loops;
     } c_;
@@ -358,18 +337,17 @@ private:
 
     static uint64_t bits(double v) { uint64_t u; std::memcpy(&u, &v, 8); return u; }
 
-    // ---- stack temporaries
     void push_val(NType t) {
         if (t == NType::Float) a_.movq_rx(x64::RAX, 0);
         a_.push_r(x64::RAX);
         c_.depth += 8;
     }
-    void pop_val(NType t) {   // into rax / xmm0
+    void pop_val(NType t) {
         a_.pop_r(x64::RAX);
         c_.depth -= 8;
         if (t == NType::Float) a_.movq_xr(0, x64::RAX);
     }
-    void align_call_begin(bool& padded) {   // before a call with no stack args
+    void align_call_begin(bool& padded) {
         padded = (c_.depth % 16) != 0;
         if (padded) a_.alu_ri(5, x64::RSP, 8);
     }
@@ -377,7 +355,6 @@ private:
 
     void err_check() { a_.cmp_m32_imm8(x64::R12, 0, 0); a_.jcc(x64::CC_NE, c_.ret_zero); }
 
-    // ---- expressions: result in rax (Int) or xmm0 (Float) according to type_of(e)
     bool is_simple(const ExprPtr& e) {
         return e->kind == ExprKind::Int || e->kind == ExprKind::Float ||
                (e->kind == ExprKind::Ident && local_type_ok(e->name));
@@ -395,7 +372,6 @@ private:
         return fail("float value used where an int is required");
     }
 
-    // Loads a simple expression into rcx (Int) or xmm1 (Float), converted to `want`.
     bool load_simple(const ExprPtr& e, NType want, int idst = x64::RCX, int xdst = 1) {
         if (e->kind == ExprKind::Int) {
             if (want == NType::Float) { a_.mov_ri(idst, (int64_t)bits((double)e->int_val)); a_.movq_xr(xdst, idst); }
@@ -422,15 +398,12 @@ private:
         return true;
     }
 
-    // left -> rax/xmm0, right -> rcx/xmm1, both as type t.
     bool gen_operands(const ExprPtr& l, const ExprPtr& r, NType t) {
         if (is_simple(r)) {
             if (!gen_to(l, t)) return false;
             return load_simple(r, t);
         }
         if (is_simple(l)) {
-            // Reading a variable or literal cannot fail or have side effects, so the more
-            // complex right operand can be evaluated first: no push/pop needed.
             if (!gen_to(r, t)) return false;
             if (t == NType::Float) a_.movapd(1, 0); else a_.mov_rr(x64::RCX, x64::RAX);
             return load_simple(l, t, x64::RAX, 0);
@@ -576,7 +549,7 @@ private:
                 const int ok = a_.new_label();
                 a_.xorpd(2, 2);
                 a_.ucomisd(1, 2);
-                a_.jcc(CC_P, ok);           // NaN divisor is not zero
+                a_.jcc(CC_P, ok);
                 a_.jcc(CC_NE, ok);
                 a_.jmp(c_.err_div);
                 a_.bind(ok);
@@ -585,11 +558,11 @@ private:
             }
             if (!gen_operands(e->left, e->right, NType::Int)) return false;
             const int normal = a_.new_label(), done = a_.new_label();
-            a_.alu_rr(0x85, RCX, RCX);       // test rcx,rcx
+            a_.alu_rr(0x85, RCX, RCX);
             a_.jcc(CC_E, c_.err_div);
             a_.alu_ri(7, RCX, -1);
             a_.jcc(CC_NE, normal);
-            a_.neg_r(RAX);                   // a / -1 == -a; INT64_MIN overflows (OF is set)
+            a_.neg_r(RAX);
             a_.jcc(CC_O, c_.err_ovf);
             a_.jmp(done);
             a_.bind(normal);
@@ -621,45 +594,43 @@ private:
         return fail("unsupported binary operator");
     }
 
-    // rax = rax / c  (or rax % c) for a literal c >= 2: no divide instruction, no error paths.
     void gen_div_const(int64_t c, bool want_mod) {
         using namespace x64;
-        a_.mov_rr(RCX, RAX);                            // rcx = n
+        a_.mov_rr(RCX, RAX);
         if ((c & (c - 1)) == 0) {
             const int k = __builtin_ctzll((uint64_t)c);
             a_.mov_rr(RDX, RAX);
-            a_.shift_ri(7, RDX, 63);                    // rdx = n >> 63 (all ones if negative)
+            a_.shift_ri(7, RDX, 63);
             if (c - 1 <= INT32_MAX) a_.alu_ri(4, RDX, (int32_t)(c - 1));
             else { a_.mov_ri(RAX, c - 1); a_.alu_rr(0x21, RDX, RAX); }
             a_.mov_rr(RAX, RCX);
-            a_.alu_rr(0x01, RAX, RDX);                  // n + bias
-            a_.shift_ri(7, RAX, (uint8_t)k);            // q
+            a_.alu_rr(0x01, RAX, RDX);
+            a_.shift_ri(7, RAX, (uint8_t)k);
             if (want_mod) {
-                a_.shift_ri(4, RAX, (uint8_t)k);        // q * c
-                a_.alu_rr(0x29, RCX, RAX);              // n - q*c
+                a_.shift_ri(4, RAX, (uint8_t)k);
+                a_.alu_rr(0x29, RCX, RAX);
                 a_.mov_rr(RAX, RCX);
             }
             return;
         }
         const DivMagic m = div_magic_for(c);
         a_.mov_ri(RAX, m.multiplier);
-        a_.imul1(RCX);                                  // rdx = high 64 bits of M * n
+        a_.imul1(RCX);
         if (m.multiplier < 0) a_.alu_rr(0x01, RDX, RCX);
         if (m.shift > 0) a_.shift_ri(7, RDX, (uint8_t)m.shift);
         a_.mov_rr(RAX, RDX);
         a_.shift_ri(5, RAX, 63);
-        a_.alu_rr(0x01, RDX, RAX);                      // q
+        a_.alu_rr(0x01, RDX, RAX);
         if (want_mod) {
             if (c <= INT32_MAX) a_.imul_rri(RDX, RDX, (int32_t)c);
-            else { a_.mov_ri(RAX, c); a_.imul_rr(RDX, RAX); }   // q * c
-            a_.alu_rr(0x29, RCX, RDX);                  // n - q*c
+            else { a_.mov_ri(RAX, c); a_.imul_rr(RDX, RAX); }
+            a_.alu_rr(0x29, RCX, RDX);
             a_.mov_rr(RAX, RCX);
         } else {
             a_.mov_rr(RAX, RDX);
         }
     }
 
-    // rax % rcx with the C path's semantics: b==0 -> error 1; a % -1 == 0.
     bool gen_mod() {
         using namespace x64;
         const int ok = a_.new_label(), done = a_.new_label();
@@ -753,12 +724,6 @@ private:
     }
 
 
-    // ---- inlining of small leaf functions
-    // A callee is inlined when it is loop-free, calls no user function (math builtins are fine) and
-    // is small. Its body is emitted in place with its own variable frame: arguments are evaluated in
-    // the caller's context and stored into the callee's parameter slots, `return` jumps to the end of
-    // the expansion with the value in rax/xmm0, and errors jump to the caller's error exits, which is
-    // what a real call's error check does anyway.
     static constexpr int kMaxInlineExpansions = 32;
     static constexpr int kMaxInlineNodes = 56;
     std::unordered_map<std::string, int> inline_ok_;
@@ -806,7 +771,7 @@ private:
                     }
                     break;
                 default:
-                    return false;   // loops, break/continue and anything else stay real calls
+                    return false;
             }
             if (nodes > kMaxInlineNodes) return false;
         }
@@ -827,7 +792,6 @@ private:
 
     bool gen_inline_call(const ExprPtr& e, FnInfo& callee) {
         using namespace x64;
-        // the callee's variables, all memory-resident in fresh slots of this frame
         std::unordered_map<std::string, Var> frame;
         std::vector<std::string> names;
         for (const auto& kv : callee.local_types) {
@@ -842,7 +806,6 @@ private:
             v.slot = new_slot();
             frame[n] = v;
         }
-        // bind arguments, evaluated left to right in the caller's context
         for (size_t i = 0; i < e->args.size(); i++) {
             const ExprPtr& arg = e->args[i];
             const std::string& p = callee.param_names[i];
@@ -882,7 +845,6 @@ private:
                 a_.movsd_store(RBP, frame.at(global).slot, 0);
             }
         }
-        // remaining locals start at zero (CSy is function-scoped)
         {
             std::vector<std::string> zero;
             for (const auto& n : names) {
@@ -894,7 +856,6 @@ private:
             if (!zero.empty()) a_.mov_ri(RAX, 0);
             for (const auto& n : zero) a_.mov_mr(RBP, frame.at(n).slot, RAX);
         }
-        // switch to the callee's context
         FnInfo* saved_fn = c_.fn;
         std::unordered_map<std::string, Var> saved_vars = std::move(c_.vars);
         const int saved_exit = c_.inline_exit;
@@ -905,7 +866,7 @@ private:
         c_.inline_exit = a_.new_label();
         c_.loops.clear();
         const bool ok = gen_stmts(callee.decl->body);
-        a_.mov_ri(RAX, 0);                    // falling off the end returns 0, as in a real call
+        a_.mov_ri(RAX, 0);
         a_.xorpd(0, 0);
         a_.bind(c_.inline_exit);
         c_.vars = std::move(saved_vars);
@@ -930,7 +891,6 @@ private:
     }
 
     void call_helper(int id) {
-        // Variables held in registers the C ABI may clobber go back to their home slots first.
         std::vector<const Var*> spilled;
         auto collect = [&](const std::unordered_map<std::string, Var>& scope) {
             for (const auto& kv : scope) {
@@ -975,7 +935,7 @@ private:
             a_.bind(keep);
             return true;
         }
-        if (name == "sqrt" && e->args.size() == 1) {      // sqrtsd is correctly rounded, as libm's sqrt is
+        if (name == "sqrt" && e->args.size() == 1) {
             if (!gen_to(e->args[0], NType::Float)) return false;
             a_.sqrtsd(0, 0);
             return true;
@@ -1012,25 +972,23 @@ private:
         return true;
     }
 
-    // index expression -> rax as Int
     bool gen_index_value(const ExprPtr& idx) {
         if (!gen_expr(idx)) return false;
         if (type_of(idx) == NType::Float) a_.cvttsd2si(x64::RAX, 0);
         return true;
     }
 
-    // rax = index; afterwards rax = normalised index, rdx = data pointer (bounds checked)
     int emit_bounds_and_base(const std::string& name) {
         using namespace x64;
         const int ok = a_.new_label();
         get_int("len_" + name, RDX);
-        a_.alu_rr(0x39, RAX, RDX);              // cmp rax, len  (unsigned: negative indexes look huge)
-        a_.jcc(CC_B, ok);                       // 0 <= index < length: the common case
-        a_.alu_rr(0x85, RAX, RAX);
-        a_.jcc(CC_NS, c_.err_idx);              // index >= length
-        a_.alu_rr(0x01, RAX, RDX);              // negative index counts from the end
         a_.alu_rr(0x39, RAX, RDX);
-        a_.jcc(CC_AE, c_.err_idx);              // still out of range (or negative)
+        a_.jcc(CC_B, ok);
+        a_.alu_rr(0x85, RAX, RAX);
+        a_.jcc(CC_NS, c_.err_idx);
+        a_.alu_rr(0x01, RAX, RDX);
+        a_.alu_rr(0x39, RAX, RDX);
+        a_.jcc(CC_AE, c_.err_idx);
         a_.bind(ok);
         const Var& d = var(name);
         if (d.reg >= 0) return d.reg;
@@ -1038,7 +996,6 @@ private:
         return RDX;
     }
 
-    // ---- conditions
     static int invert_cc(int cc) {
         switch (cc) {
             case x64::CC_E: return x64::CC_NE;
@@ -1046,7 +1003,7 @@ private:
             case x64::CC_L: return x64::CC_GE;
             case x64::CC_GE: return x64::CC_L;
             case x64::CC_G: return x64::CC_LE;
-            default: return x64::CC_G;   // CC_LE
+            default: return x64::CC_G;
         }
     }
     static int int_cc(TokenType op) {
@@ -1059,22 +1016,18 @@ private:
             default: return x64::CC_NE;
         }
     }
-    // Branch on flags already set: to t when `cc` holds, else to f. `next` is the label bound
-    // right after this code (t, f or -1), so a jump to it is never emitted.
     void branch_cc(int cc, int t, int f, int next) {
         if (next == t) { a_.jcc(invert_cc(cc), f); return; }
         a_.jcc(cc, t);
         if (next != f) a_.jmp(f);
     }
-    // After ucomisd: floating-point condition with C semantics (every comparison with NaN is
-    // false except !=).
     void branch_float(TokenType op, int t, int f, int next) {
         using namespace x64;
         switch (op) {
             case TokenType::LT: case TokenType::LE: case TokenType::GT: case TokenType::GE: {
                 const bool strict = op == TokenType::LT || op == TokenType::GT;
-                const int true_cc = strict ? CC_A : CC_AE;       // CF=0 (and ZF=0): ordered and greater
-                const int false_cc = strict ? CC_BE : CC_B;      // unordered sets CF=1, so NaN lands here
+                const int true_cc = strict ? CC_A : CC_AE;
+                const int false_cc = strict ? CC_BE : CC_B;
                 if (next == t) { a_.jcc(false_cc, f); }
                 else { a_.jcc(true_cc, t); if (next != f) a_.jmp(f); }
                 return;
@@ -1083,7 +1036,7 @@ private:
                 if (next == t) { a_.jcc(CC_P, f); a_.jcc(CC_NE, f); }
                 else { a_.jcc(CC_P, f); a_.jcc(CC_E, t); if (next != f) a_.jmp(f); }
                 return;
-            default:   // != : true when unordered or different
+            default:
                 if (next == t) { const int ok = a_.new_label(); a_.jcc(CC_P, ok); a_.jcc(CC_E, f); a_.bind(ok); }
                 else { a_.jcc(CC_P, t); a_.jcc(CC_NE, t); if (next != f) a_.jmp(f); }
                 return;
@@ -1104,7 +1057,7 @@ private:
                                             e->op == TokenType::GE || e->op == TokenType::EQ || e->op == TokenType::NEQ)) {
             const bool fl = type_of(e->left) == NType::Float || type_of(e->right) == NType::Float;
             if (!fl && e->right->kind == ExprKind::Int && e->right->int_val >= INT32_MIN && e->right->int_val <= INT32_MAX) {
-                if (!gen_to(e->left, NType::Int)) return false;      // compare with a constant: no register needed
+                if (!gen_to(e->left, NType::Int)) return false;
                 if (e->right->int_val == 0) a_.alu_rr(0x85, RAX, RAX);
                 else a_.alu_ri(7, RAX, (int32_t)e->right->int_val);
                 branch_cc(int_cc(e->op), t, f, next);
@@ -1123,7 +1076,6 @@ private:
             branch_float(e->op, t, f, next);
             return true;
         }
-        // truthiness of a number: non-zero (NaN counts as non-zero, like C's != 0)
         if (!gen_expr(e)) return false;
         if (type_of(e) == NType::Float) {
             a_.xorpd(1, 1);
@@ -1136,7 +1088,6 @@ private:
         return true;
     }
 
-    // ---- statements
     bool store_scalar(const std::string& name, NType value_type) {
         const NType tt = local_type(name);
         if (tt == NType::Array) return fail("assignment to an array variable");
@@ -1155,13 +1106,13 @@ private:
         return true;
     }
 
-    bool gen_array_store(const ExprPtr& target, const ExprPtr& value, int compound /*0 set,1 add,2 sub*/) {
+    bool gen_array_store(const ExprPtr& target, const ExprPtr& value, int compound  ) {
         using namespace x64;
         const std::string& name = target->object->name;
         if (!has_var("len_" + name)) return fail("index of a non-array");
         if (!gen_index_value(target->index)) return false;
         if (is_simple(value)) {
-            a_.mov_rr(RCX, RAX);                         // keep the index in rcx while loading the value
+            a_.mov_rr(RCX, RAX);
             if (!load_simple(value, NType::Float, RAX, 0)) return false;
             a_.mov_rr(RAX, RCX);
         } else {
@@ -1180,26 +1131,15 @@ private:
         return true;
     }
 
-    // ---- element-wise array loops (SSE2, two doubles per step)
-    // A `for i in thru N` loop whose whole body is one assignment `out[i + k] = expr`, where expr is built
-    // from + - *, float (or int) literals and reads `a[i + c]` of other arrays (k, c >= 0), needs no
-    // result ordering: every output element depends only on input elements, so computing two at a time
-    // gives bit-identical results (same operations, same order within each element, no FMA).
-    // The fast path is taken only when ONE check at loop entry proves what the scalar loop checks per
-    // element: at least 4 iterations, every index range inside its array, and the output array not
-    // overlapping any input array (arguments may alias). Otherwise the ordinary scalar loop runs from
-    // the start, so errors, partial writes and aliased arguments behave exactly as before. An odd last
-    // element is finished by the ordinary scalar loop too.
     struct VecPlan {
         std::string target; int target_off = 0;
-        std::map<std::string, int> reads;        // array -> largest constant offset read
+        std::map<std::string, int> reads;
         ExprPtr value;
     };
     static bool vec_enabled() {
         static const bool off = std::getenv("CSY_NO_VECTOR_LOOPS") != nullptr;
         return !off;
     }
-    // index expression `i` or `i + c` / `c + i` with 0 <= c <= 4096 -> offset
     static bool vec_index(const ExprPtr& idx, const std::string& loop_var, int& off) {
         if (!idx) return false;
         if (idx->kind == ExprKind::Ident) { off = 0; return idx->name == loop_var; }
@@ -1212,7 +1152,6 @@ private:
         off = (int)(*lit)->int_val;
         return true;
     }
-    // number of xmm registers the packed evaluation needs; 0 when the tree is not eligible
     int vec_expr_ok(const ExprPtr& e, VecPlan& plan, const std::string& loop_var, bool int_leaf_ok, int& nodes) {
         if (!e || ++nodes > 48) return 0;
         switch (e->kind) {
@@ -1259,7 +1198,6 @@ private:
         plan.value = assign->value;
         return true;
     }
-    // packed evaluation of `e` into xmm<k>; uses rax (index) and rcx (scratch); k stays below 8
     void vec_gen(const ExprPtr& e, int k) {
         using namespace x64;
         switch (e->kind) {
@@ -1278,7 +1216,7 @@ private:
                 a_.movupd_load_idx(k, RCX, RAX, off * 8);
                 return;
             }
-            default: {   // Binary + - *
+            default: {
                 vec_gen(e->left, k);
                 vec_gen(e->right, k + 1);
                 if (e->op == TokenType::PLUS) a_.addpd(k, k + 1);
@@ -1289,41 +1227,40 @@ private:
         }
     }
     std::string vec_loop_var_;
-    // Emitted right before the scalar loop head `top`. Falls through to `top` after the vector part.
     void vec_emit(const VecPlan& p, const StmtPtr& s, const std::string& cn, const std::string& bn, int top) {
         using namespace x64;
         vec_loop_var_ = s->loop_var;
         dbg("own x86-64 backend: element-wise loop at line " + std::to_string(s->tok.line) + " has a vector fast path");
-        get_int(bn, RAX);                                   // trips
-        a_.alu_ri(7, RAX, 4);                               // cmp rax, 4
-        a_.jcc(CC_L, top);                                  // fewer than 4 iterations (or none): scalar loop
+        get_int(bn, RAX);
+        a_.alu_ri(7, RAX, 4);
+        a_.jcc(CC_L, top);
         std::vector<std::pair<std::string, int>> arrays(p.reads.begin(), p.reads.end());
         arrays.emplace_back(p.target, p.target_off);
-        for (const auto& [name, cmax] : arrays) {           // length - cmax >= trips: every index is in range
+        for (const auto& [name, cmax] : arrays) {
             get_int("len_" + name, RCX);
-            a_.alu_ri(5, RCX, cmax);                        // sub rcx, cmax (length >= 0: cannot overflow)
-            a_.alu_rr(0x39, RCX, RAX);                      // cmp rcx, rax
+            a_.alu_ri(5, RCX, cmax);
+            a_.alu_rr(0x39, RCX, RAX);
             a_.jcc(CC_L, top);
         }
-        for (const auto& [name, cmax] : p.reads) {          // the output must not overlap this input
+        for (const auto& [name, cmax] : p.reads) {
             (void)cmax;
             const int ok = a_.new_label();
-            get_int(name, RAX);                             // input start
+            get_int(name, RAX);
             get_int("len_" + name, RCX);
             a_.shift_ri(4, RCX, 3);
-            a_.alu_rr(0x01, RCX, RAX);                      // input end
-            get_int(p.target, RDX);                         // output start
+            a_.alu_rr(0x01, RCX, RAX);
+            get_int(p.target, RDX);
             a_.alu_rr(0x39, RCX, RDX);
-            a_.jcc(CC_BE, ok);                              // input ends before the output starts
+            a_.jcc(CC_BE, ok);
             get_int("len_" + p.target, RCX);
             a_.shift_ri(4, RCX, 3);
-            a_.alu_rr(0x01, RCX, RDX);                      // output end
+            a_.alu_rr(0x01, RCX, RDX);
             a_.alu_rr(0x39, RCX, RAX);
-            a_.jcc(CC_A, top);                              // output ends after the input starts too: overlap
+            a_.jcc(CC_A, top);
             a_.bind(ok);
         }
         get_int(bn, RDX);
-        a_.dec_r(RDX);                                      // pairs (i, i+1) exist while i < trips - 1
+        a_.dec_r(RDX);
         a_.mov_ri(RAX, 0);
         const int vtop = a_.new_label(), vdone = a_.new_label();
         a_.bind(vtop);
@@ -1335,9 +1272,9 @@ private:
         a_.alu_ri(0, RAX, 2);
         a_.jmp(vtop);
         a_.bind(vdone);
-        put_int(cn, RAX);                                   // counter = elements done
+        put_int(cn, RAX);
         a_.alu_ri(5, RAX, 1);
-        store_scalar(s->loop_var, NType::Int);              // loop variable = last element done
+        store_scalar(s->loop_var, NType::Int);
     }
 
     bool gen_stmt(const StmtPtr& s) {
@@ -1359,7 +1296,6 @@ private:
                 if (s->expr->kind == ExprKind::Assign) return gen_array_store(s->expr->target, s->expr->value, 0);
                 if (s->expr->target->kind == ExprKind::Index)
                     return gen_array_store(s->expr->target, s->expr->value, s->expr->op == TokenType::MINUS_EQ ? 2 : 1);
-                // scalar compound: target = target (+|-) value
                 auto tmp = std::make_shared<Expr>();
                 tmp->kind = ExprKind::Binary;
                 tmp->op = s->expr->op == TokenType::PLUS_EQ ? TokenType::PLUS : TokenType::MINUS;
@@ -1427,8 +1363,6 @@ private:
                     VecPlan plan;
                     if (c_.inline_exit < 0 && vec_plan(s, plan)) { vec_emit(plan, s, cn, bn, top); is_vec = true; }
                 }
-                // For the backend choice a vector loop counts as profitable unless its bound is a compile-time
-                // constant below 256: such a loop is provably small, where the vector path wins nothing.
                 const bool profitable = is_vec && !(bexpr->kind == ExprKind::Int && bexpr->int_val < 256);
                 if (profitable && cur_stat_) cur_stat_->vector_loops++;
                 loop_enter();
@@ -1468,7 +1402,7 @@ private:
                     if (c_.inline_exit >= 0) { a_.jmp(c_.inline_exit); return true; }
                 } else {
                     if (c_.inline_exit >= 0) { a_.jmp(c_.inline_exit); return true; }
-                    {   // static result tag, reported only by the outermost call
+                    {
                         const int inner = a_.new_label();
                         a_.alu_rr(0x85, R13, R13);
                         a_.jcc(CC_NE, inner);
@@ -1493,8 +1427,6 @@ private:
     }
     static int H_BOUND_F_ID() { return x64::H_BOUND_F; }
 
-    // ---- register allocation: weigh every variable by how often it is used, counting a use
-    // inside a loop eight times per nesting level, then give the hottest ones registers.
     using Weights = std::unordered_map<std::string, long long>;
     bool is_array_name(const std::string& n) {
         auto it = c_.fn->local_types.find(n);
@@ -1565,7 +1497,6 @@ private:
         }
     }
 
-    // ---- functions
     bool emit_function(FnInfo& fn, const std::string& key) {
         using namespace x64;
         c_ = Ctx();
@@ -1573,7 +1504,6 @@ private:
         cur_stat_ = &loop_stats_[key];
         loop_has_vec_.clear();
 
-        // variables: every scalar local, each array parameter's pointer and length, loop counters
         Weights w;
         int loops = 0;
         weigh_stmts(fn.decl->body, 1, w, loops);
@@ -1622,7 +1552,7 @@ private:
             int next_int = 0, next_float = 8;
             for (const auto& n : ranked) {
                 const long long weight = w.count(n) ? w[n] : 0;
-                if (weight < 6) continue;   // must repay the save/restore a callee pays for each register
+                if (weight < 6) continue;
                 Var& v = c_.vars[n];
                 if (v.is_float) { if (next_float < 16) v.reg = next_float++; }
                 else if (next_int < 8) v.reg = kIntPool[next_int++];
@@ -1636,7 +1566,7 @@ private:
         a_.bind(fn_label_.at(key));
         a_.push_r(RBP);
         a_.mov_rr(RBP, RSP);
-        a_.b(0x48); a_.b(0x81); a_.b(0xEC);              // sub rsp, imm32 (patched below)
+        a_.b(0x48); a_.b(0x81); a_.b(0xEC);
         const size_t frame_patch = a_.pos();
         a_.d32(0);
         c_.ret_zero = a_.new_label();
@@ -1645,13 +1575,11 @@ private:
         c_.err_idx = a_.new_label();
         c_.epilogue = a_.new_label();
 
-        // keep the caller's values of the registers this function uses
         for (int e : c_.used_regs) {
             if (e & 256) a_.movsd_store(RBP, c_.save_slot[e], e & 255);
             else a_.mov_mr(RBP, c_.save_slot[e], e & 255);
         }
 
-        // depth guard
         const int depth_ok = a_.new_label();
         a_.alu_ri(7, R13, (int32_t)kMaxNativeDepth);
         a_.jcc(CC_LE, depth_ok);
@@ -1659,7 +1587,6 @@ private:
         a_.jmp(c_.ret_zero);
         a_.bind(depth_ok);
 
-        // parameters: pushed in order, so the last one is at [rbp+16]
         int param_slots = 0;
         for (size_t i = 0; i < fn.param_names.size(); i++)
             param_slots += fn.sig[i] == 'A' || fn.sig[i] == 'M' ? 2 : 1;
@@ -1673,7 +1600,7 @@ private:
                 for (const auto& part : {std::make_pair(p, data_src), std::make_pair("len_" + p, len_src)}) {
                     Var& v = var(part.first);
                     if (v.reg >= 0) a_.mov_rm(v.reg, RBP, part.second);
-                    else v.slot = part.second;                 // no copy: the pushed argument is the home
+                    else v.slot = part.second;
                 }
                 pos += 2;
             } else {
@@ -1704,7 +1631,6 @@ private:
                 pos += fn.sig[i] == 'M' ? 2 : 1;
             }
         }
-        // remaining locals start at zero (CSy is function-scoped)
         for (const auto& n : names) {
             if (n[0] == '@' || n.compare(0, 4, "len_") == 0) continue;
             if (std::find(fn.param_names.begin(), fn.param_names.end(), n) != fn.param_names.end()) continue;
@@ -1720,7 +1646,6 @@ private:
         if (!gen_stmts(fn.decl->body)) return false;
         a_.jmp(c_.ret_zero);
 
-        // shared error exits: the first error code sticks; return 0
         a_.bind(c_.err_div); emit_set_err(1);
         a_.bind(c_.err_idx); emit_set_err(3);
         a_.bind(c_.err_ovf); emit_set_err(4);
@@ -1742,8 +1667,6 @@ private:
     }
     void emit_set_err(int code) {
         using namespace x64;
-        // falls through into the next handler when err was already set; each handler is
-        // followed by a jump to ret_zero so fall-through never actually happens.
         const int skip = a_.new_label();
         a_.cmp_m32_imm8(R12, 0, 0);
         a_.jcc(CC_NE, skip);
@@ -1752,20 +1675,15 @@ private:
         a_.jmp(c_.ret_zero);
     }
 
-    // Exported wrapper with the VM's uniform ABI:
-    //   void entry(const CsyNativeArg* a /*rdi*/, int* err /*rsi*/, int* rtag /*rdx*/, CsyRet* out /*rcx*/)
     void emit_entry(const FnInfo& fn, const std::string& key) {
         using namespace x64;
         a_.push_r(RBP);
         a_.mov_rr(RBP, RSP);
         a_.push_r(R12); a_.push_r(R13); a_.push_r(R14);
-        a_.push_r(RCX);                         // out (rsp is 16-byte aligned again here)
+        a_.push_r(RCX);
         a_.mov_rr(R12, RSI);
         a_.mov_ri(R13, 0);
         a_.mov_rr(R14, RDX);
-        // Entry guard: an int parameter the body turns into a float must be exactly representable as a
-        // double (|v| < 2^53). Computed as (v + 2^53 - 1) unsigned-above (2^54 - 2). Raised before anything
-        // has run, so the VM can safely run the bytecode version instead (error 5).
         const std::vector<size_t> guards = entry_guard_params(fn);
         int guard_fail = -1;
         if (!guards.empty()) {
@@ -1804,8 +1722,8 @@ private:
         a_.pop_r(RBP);
         a_.ret();
         if (guard_fail >= 0) {
-            a_.bind(guard_fail);                 // stack here: only the five entry pushes
-            a_.mov_m32_imm(R12, 0, 5);           // *err = 5
+            a_.bind(guard_fail);
+            a_.mov_m32_imm(R12, 0, 5);
             a_.pop_r(RCX);
             a_.pop_r(R14); a_.pop_r(R13); a_.pop_r(R12);
             a_.pop_r(RBP);
@@ -1814,7 +1732,6 @@ private:
     }
 };
 
-// ---- image (de)serialisation and loading ---------------------------------------------
 
 static void x64_put32(std::string& s, uint32_t v) { for (int i = 0; i < 4; i++) s.push_back((char)((v >> (8 * i)) & 0xFF)); }
 
@@ -1884,12 +1801,9 @@ bool x64_parse(const std::string& s, x64::Image& img) {
     return img.blob.size() > (size_t)x64::H_COUNT * 8;
 }
 
-// Maps the image, fills the helper table, makes it executable, and binds each entry to
-// the matching function of `ir`. The mapping lives for the rest of the process.
 bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why, bool only_missing = false) {
     std::unordered_map<std::string, size_t> ir_index;
     for (size_t i = 0; i < ir.functions.size(); i++) ir_index.emplace(ir.functions[i].name, i);
-    // only_missing: the image supplies just the functions (name + signature) no library variant covers
     auto covered = [&](const x64::Entry& e) {
         auto it = ir_index.find(e.name);
         if (it == ir_index.end()) return true;
@@ -1900,7 +1814,7 @@ bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why
     if (only_missing) {
         bool any = false;
         for (const auto& e : img.entries) if (!covered(e)) { any = true; break; }
-        if (!any) { loaded = 0; return true; }       // nothing to supply: do not even map the image
+        if (!any) { loaded = 0; return true; }
     }
     const size_t len = (img.blob.size() + 4095) & ~size_t(4095);
     void* mem = ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1937,4 +1851,5 @@ bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why
     return true;
 }
 
-#endif  // x86-64 Linux
+#endif
+

@@ -88,3 +88,4 @@ std::string DiagBag::format(const std::string& source) const {
 }
 
 }
+
