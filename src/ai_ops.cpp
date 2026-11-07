@@ -165,7 +165,7 @@ void* load_cuda_library() {
 template <Activation A>
 inline double activate(double x) {
     if constexpr (A == Activation::Linear) return x;
-    if constexpr (A == Activation::Relu) return x > 0.0 ? x : 0.0;
+    if constexpr (A == Activation::Relu) return x > 0.0 ? x : (x != x ? x : 0.0);
     if constexpr (A == Activation::Tanh) return std::tanh(x);
     return 1.0 / (1.0 + std::exp(-x));
 }

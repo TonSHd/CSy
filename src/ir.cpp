@@ -107,6 +107,10 @@ static const char* op_name(Op op) {
         case Op::Q_BIN_JMPF: return "Q_BIN_JMPF";
         case Op::Q_CMP_JMPF: return "Q_CMP_JMPF";
         case Op::Q_GETIDX: return "Q_GETIDX";
+        case Op::Q_FOR_HEAD: return "Q_FOR_HEAD";
+        case Op::Q_INC_JMP: return "Q_INC_JMP";
+        case Op::Q_CALL_FUNC: return "Q_CALL_FUNC";
+        case Op::Q_RET_LOCAL: return "Q_RET_LOCAL";
     }
     return "?";
 }

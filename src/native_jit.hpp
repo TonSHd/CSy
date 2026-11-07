@@ -26,9 +26,11 @@ struct NativeReport {
 enum class NativeMode {
     Run,
     Build,
+    Aot,
 };
 
 void outline_top_level_loops(Module& mod);
+void prepare_native_fallbacks(Module& mod);
 
 NativeReport try_native_compile(const Module& mod, IRModule& ir,
                                 NativeMode mode = NativeMode::Run, bool embed_library = false);
@@ -41,4 +43,3 @@ std::string summarize_native_report(const NativeReport& report);
 std::string native_host_target();
 
 }
-

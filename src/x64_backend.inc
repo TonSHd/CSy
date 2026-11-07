@@ -5,10 +5,18 @@
 static uint32_t x64_sig_code(const std::string& sig) {
     uint32_t code = 0;
     for (size_t i = 0; i < sig.size(); i++) {
-        const uint32_t c = sig[i] == 'I' ? 1u : sig[i] == 'F' ? 2u : 3u;
+        const uint32_t c = sig[i] == 'I' ? 1u : sig[i] == 'F' ? 2u :
+                           sig[i] == 'J' || sig[i] == 'O' ? 0u : 3u;
         code |= c << (2 * i);
     }
     return code;
+}
+
+static uint16_t x64_opaque_mask(const std::string& sig) {
+    uint16_t mask = 0;
+    for (size_t i = 0; i < sig.size() && i < 16; i++)
+        if (sig[i] == 'O') mask |= static_cast<uint16_t>(1u << i);
+    return mask;
 }
 
 namespace x64 {
@@ -44,14 +52,14 @@ static double h_fabs(double x) { return std::fabs(x); }
 static double h_sign(double x) { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 static double h_tanh(double x) { return std::tanh(x); }
 static double h_sigmoid(double x) { return 1.0 / (1.0 + std::exp(-x)); }
-static double h_relu(double x) { return x > 0.0 ? x : 0.0; }
+static double h_relu(double x) { return x > 0.0 ? x : (x != x ? x : 0.0); }
 static double h_sigmoid_d(double y) { return y * (1.0 - y); }
 static double h_relu_d(double y) { return y > 0.0 ? 1.0 : 0.0; }
 static double h_tanh_d(double y) { return 1.0 - y * y; }
 static double h_atan2(double a, double b) { return std::atan2(a, b); }
 static double h_pow(double a, double b) { return std::pow(a, b); }
-static double h_fmax(double a, double b) { return std::fmax(a, b); }
-static double h_fmin(double a, double b) { return std::fmin(a, b); }
+static double h_fmax(double a, double b) { return (a != a || b != b) ? std::nan("") : std::fmax(a, b); }
+static double h_fmin(double a, double b) { return (a != a || b != b) ? std::nan("") : std::fmin(a, b); }
 static double h_clamp(double v, double lo, double hi) {
     if (std::isnan(v) || std::isnan(lo) || std::isnan(hi)) return std::numeric_limits<double>::quiet_NaN();
     return std::fmax(lo, std::fmin(v, hi));
@@ -115,26 +123,49 @@ public:
     }
     void modrm_rr(int reg, int rm) { b((uint8_t)(0xC0 | ((reg & 7) << 3) | (rm & 7))); }
     void modrm_mem(int reg, int base, int32_t disp) {
-        b((uint8_t)(0x80 | ((reg & 7) << 3) | ((base & 7) == 4 ? 4 : (base & 7))));
+        const bool small = disp >= -128 && disp <= 127;
+        b((uint8_t)((small ? 0x40 : 0x80) | ((reg & 7) << 3) | ((base & 7) == 4 ? 4 : (base & 7))));
         if ((base & 7) == 4) b(0x24);
-        d32(disp);
+        if (small) b((uint8_t)(int8_t)disp);
+        else d32(disp);
     }
 
     void mov_rr(int dst, int src) { rex(true, src, dst); b(0x89); modrm_rr(src, dst); }
     void mov_ri(int dst, int64_t imm) {
-        if (imm >= INT32_MIN && imm <= INT32_MAX) { rex(true, 0, dst); b(0xC7); modrm_rr(0, dst); d32((int32_t)imm); }
+        if (imm >= 0 && imm <= INT32_MAX) { rex(false, 0, dst); b((uint8_t)(0xB8 + (dst & 7))); d32((int32_t)imm); }
+        else if (imm >= INT32_MIN && imm <= INT32_MAX) { rex(true, 0, dst); b(0xC7); modrm_rr(0, dst); d32((int32_t)imm); }
         else { rex(true, 0, dst); b((uint8_t)(0xB8 + (dst & 7))); d64((uint64_t)imm); }
     }
     void mov_rm(int dst, int base, int32_t disp) { rex(true, dst, base); b(0x8B); modrm_mem(dst, base, disp); }
     void mov_mr(int base, int32_t disp, int src) { rex(true, src, base); b(0x89); modrm_mem(src, base, disp); }
+    void mov_rm_idx(int dst, int base, int index) {
+        const uint8_t r = (uint8_t)(0x48 | (((dst >> 3) & 1) << 2) |
+                                    (((index >> 3) & 1) << 1) | ((base >> 3) & 1));
+        b(r); b(0x8B); b((uint8_t)(0x04 | ((dst & 7) << 3)));
+        b((uint8_t)(0xC0 | ((index & 7) << 3) | (base & 7)));
+    }
+    void mov_mr_idx(int base, int index, int src) {
+        const uint8_t r = (uint8_t)(0x48 | (((src >> 3) & 1) << 2) |
+                                    (((index >> 3) & 1) << 1) | ((base >> 3) & 1));
+        b(r); b(0x89); b((uint8_t)(0x04 | ((src & 7) << 3)));
+        b((uint8_t)(0xC0 | ((index & 7) << 3) | (base & 7)));
+    }
     void mov_m32_imm(int base, int32_t disp, int32_t imm) { rex(false, 0, base); b(0xC7); modrm_mem(0, base, disp); d32(imm); }
     void mov_m32r(int base, int32_t disp, int src) { rex(false, src, base); b(0x89); modrm_mem(src, base, disp); }
     void cmp_m32_imm8(int base, int32_t disp, int8_t imm) { rex(false, 0, base); b(0x83); modrm_mem(7, base, disp); b((uint8_t)imm); }
     void alu_rr(uint8_t opcode, int dst, int src) { rex(true, src, dst); b(opcode); modrm_rr(src, dst); }
-    void alu_ri(int ext, int dst, int32_t imm) { rex(true, 0, dst); b(0x81); modrm_rr(ext, dst); d32(imm); }
+    void alu_ri(int ext, int dst, int32_t imm) {
+        rex(true, 0, dst);
+        if (imm >= -128 && imm <= 127) { b(0x83); modrm_rr(ext, dst); b((uint8_t)(int8_t)imm); }
+        else { b(0x81); modrm_rr(ext, dst); d32(imm); }
+    }
     void cmp_rm(int reg, int base, int32_t disp) { rex(true, reg, base); b(0x3B); modrm_mem(reg, base, disp); }
     void imul_rr(int dst, int src) { rex(true, dst, src); b(0x0F); b(0xAF); modrm_rr(dst, src); }
-    void imul_rri(int dst, int src, int32_t imm) { rex(true, dst, src); b(0x69); modrm_rr(dst, src); d32(imm); }
+    void imul_rri(int dst, int src, int32_t imm) {
+        rex(true, dst, src);
+        if (imm >= -128 && imm <= 127) { b(0x6B); modrm_rr(dst, src); b((uint8_t)(int8_t)imm); }
+        else { b(0x69); modrm_rr(dst, src); d32(imm); }
+    }
     void idiv_r(int r) { rex(true, 0, r); b(0xF7); modrm_rr(7, r); }
     void neg_r(int r) { rex(true, 0, r); b(0xF7); modrm_rr(3, r); }
     void cqo() { b(0x48); b(0x99); }
@@ -159,6 +190,7 @@ public:
     void jmp(int l) { b(0xE9); ref(l); }
     void jcc(int cc, int l) { b(0x0F); b((uint8_t)(0x80 | cc)); ref(l); }
     void call(int l) { b(0xE8); ref(l); }
+    void call_r(int r) { b(0xFF); b((uint8_t)(0xD0 | r)); }
 
     void sse_rr(uint8_t prefix, uint8_t op, int dst, int src) { b(prefix); rex(false, dst, src); b(0x0F); b(op); modrm_rr(dst, src); }
     void sse_rm(uint8_t prefix, uint8_t op, int xmm, int base, int32_t disp) { b(prefix); rex(false, xmm, base); b(0x0F); b(op); modrm_mem(xmm, base, disp); }
@@ -219,10 +251,18 @@ struct Entry {
     uint8_t user_nparams = 0;
     uint32_t offset = 0;
     bool ret_float = false;
+    bool ret_bool = false;
+};
+struct Site {
+    std::string func;
+    std::string file;
+    int line = 0;
+    int col = 0;
 };
 struct Image {
     std::string blob;
     std::vector<Entry> entries;
+    std::vector<Site> sites;
 };
 
 constexpr uint32_t kMaxNativeDepth = 20000;
@@ -231,7 +271,38 @@ constexpr uint32_t kMaxNativeDepth = 20000;
 
 class X64CodeGen {
 public:
-    explicit X64CodeGen(InstMap& insts) : fns_(insts) {}
+    X64CodeGen(InstMap& insts, const std::unordered_map<std::string, int>& fallback_indices)
+        : fns_(insts), fallback_indices_(fallback_indices) {
+        for (const auto& [key, fn] : fns_) {
+            bool needed = false;
+            all_stmt_exprs(fn.decl->body, [&](const ExprPtr& root) {
+                return expr_tree_all(root, [&](const ExprPtr& e) {
+                    if (e && !e->aux().native_fallback_func.empty()) needed = true;
+                    return true;
+                });
+            });
+            fallback_needed_[key] = needed;
+        }
+        bool changed;
+        do {
+            changed = false;
+            for (const auto& [key, fn] : fns_) {
+                if (fallback_needed_[key]) continue;
+                all_stmt_exprs(fn.decl->body, [&](const ExprPtr& root) {
+                    return expr_tree_all(root, [&](const ExprPtr& e) {
+                        if (!e || e->kind != ExprKind::Call) return true;
+                        std::string callee;
+                        if (callee_key(fns_, fn, e, callee) && fallback_needed_[callee]) {
+                            fallback_needed_[key] = true;
+                            changed = true;
+                        }
+                        return true;
+                    });
+                });
+            }
+        } while (changed);
+        plan_registers();
+    }
 
     bool generate(const std::vector<std::string>& emit_order, const std::vector<std::string>& exported,
                   x64::Image& image, std::string& why) {
@@ -248,11 +319,13 @@ public:
             emit_entry(f, key);
             Entry e;
             e.name = f.base_name; e.sig = f.sig; e.offset = (uint32_t)off; e.ret_float = f.return_type == NType::Float;
+            e.ret_bool = decl_returns_bool(f.decl);
             e.user_nparams = static_cast<uint8_t>(f.user_param_count);
             e.global_names = f.global_params;
             image.entries.push_back(std::move(e));
         }
         if (!a_.all_bound()) { why = "internal error: unbound label"; return false; }
+        image.sites = sites_;
         image.blob.assign(reinterpret_cast<const char*>(a_.code.data()), a_.code.size());
         return true;
     }
@@ -263,6 +336,10 @@ public:
 private:
     using Asm = x64::Asm;
     InstMap& fns_;
+    const std::unordered_map<std::string, int>& fallback_indices_;
+    std::unordered_map<std::string, bool> fallback_needed_;
+    std::unordered_map<std::string, std::unordered_map<std::string, int>> register_plan_;
+    std::unordered_set<std::string> planned_register_functions_;
     std::unordered_map<std::string, LoopStat> loop_stats_;
     LoopStat* cur_stat_ = nullptr;
     std::vector<bool> loop_has_vec_;
@@ -297,7 +374,13 @@ private:
         int inline_expansions = 0;
         int next_slot = 1;
         int depth = 0;
-        int ret_zero = -1, err_div = -1, err_ovf = -1, err_idx = -1;
+        int context_slot = 0, fallback_slot = 0;
+        bool needs_fallback = false;
+        bool preserve_regs = true;
+        int ret_zero = -1;
+        struct Stub { int code; int site; int label; };
+        std::vector<Stub> stubs;
+        std::vector<const NodeTok*> toks;
         std::vector<Loop> loops;
     } c_;
 
@@ -361,7 +444,7 @@ private:
     }
     bool local_type_ok(const std::string& name) {
         auto it = c_.fn->local_types.find(name);
-        return it != c_.fn->local_types.end() && it->second != NType::Array;
+        return it != c_.fn->local_types.end() && !is_array_type(it->second);
     }
 
     bool gen_to(const ExprPtr& e, NType want) {
@@ -427,9 +510,42 @@ private:
     }
 
     bool gen_expr(const ExprPtr& e) {
+        c_.toks.push_back(&e->tok);
+        const bool ok = gen_expr_raw(e);
+        c_.toks.pop_back();
+        return ok;
+    }
+
+    int err_label(int code) {
+        int site = 0;
+        if (!c_.toks.empty() && c_.fn && sites_.size() < (1u << 22)) {
+            const NodeTok& tok = *c_.toks.back();
+            const std::string& file = tok.file_ptr ? *tok.file_ptr : empty_file_;
+            const auto key = std::make_tuple(c_.fn->base_name, file, tok.line, tok.col);
+            auto it = site_index_.find(key);
+            if (it == site_index_.end()) {
+                x64::Site rec;
+                rec.func = c_.fn->base_name;
+                rec.file = file;
+                rec.line = tok.line;
+                rec.col = tok.col;
+                sites_.push_back(std::move(rec));
+                it = site_index_.emplace(key, static_cast<int>(sites_.size())).first;
+            }
+            site = it->second;
+        }
+        for (const auto& stub : c_.stubs)
+            if (stub.code == code && stub.site == site) return stub.label;
+        const int label = a_.new_label();
+        c_.stubs.push_back({code, site, label});
+        return label;
+    }
+
+    bool gen_expr_raw(const ExprPtr& e) {
         using namespace x64;
         switch (e->kind) {
             case ExprKind::Int: a_.mov_ri(RAX, e->int_val); return true;
+            case ExprKind::Bool: a_.mov_ri(RAX, e->bool_val ? 1 : 0); return true;
             case ExprKind::Float: a_.mov_ri(RAX, (int64_t)bits(e->float_val)); a_.movq_xr(0, RAX); return true;
             case ExprKind::Ident: {
                 if (!local_type_ok(e->name)) return fail("array used as a value");
@@ -439,8 +555,8 @@ private:
             }
             case ExprKind::Unary: {
                 if (e->op == TokenType::MINUS) {
-                    if (!gen_expr(e->operand)) return false;
-                    if (type_of(e->operand) == NType::Int) { a_.neg_r(RAX); a_.jcc(CC_O, c_.err_ovf); }
+                    if (!gen_expr(e->kids().operand)) return false;
+                    if (type_of(e->kids().operand) == NType::Int) { a_.neg_r(RAX); a_.jcc(CC_O, err_label(8)); }
                     else {
                         a_.mov_ri(RCX, (int64_t)0x8000000000000000ULL);
                         a_.movq_xr(1, RCX);
@@ -475,7 +591,7 @@ private:
                 return true;
             }
             case ExprKind::Unary:
-                if (e->op == TokenType::MINUS) return gen_expr_tag(e->operand);
+                if (e->op == TokenType::MINUS) return gen_expr_tag(e->kids().operand);
                 a_.mov_ri(RAX, 0);
                 return true;
             case ExprKind::Binary:
@@ -484,24 +600,29 @@ private:
                     a_.mov_ri(RAX, 0);
                     return true;
                 }
-                if (!gen_expr_tag(e->left)) return false;
+                if (!gen_expr_tag(e->kids().left)) return false;
                 a_.push_r(RAX); c_.depth += 8;
-                if (!gen_expr_tag(e->right)) return false;
+                if (!gen_expr_tag(e->kids().right)) return false;
                 a_.mov_rr(RCX, RAX);
                 a_.pop_r(RAX); c_.depth -= 8;
                 a_.alu_rr(0x09, RAX, RCX);
                 return true;
-            case ExprKind::Index: a_.mov_ri(RAX, 1); return true;
+            case ExprKind::Index: a_.mov_ri(RAX, type_of(e) == NType::Float ? 1 : 0); return true;
             case ExprKind::Call: {
-                auto math = math_whitelist().find(e->callee->name);
+                if (e->kids().callee->name == kLenCall) { a_.mov_ri(RAX, 0); return true; }
+                auto math = math_whitelist().find(e->kids().callee->name);
                 if (math != math_whitelist().end()) {
+                    if (math->second.kind == MathKind::Pred1 || math->second.kind == MathKind::ToInt) {
+                        a_.mov_ri(RAX, 0);
+                        return true;
+                    }
                     if (math->second.kind != MathKind::Promote2) {
                         a_.mov_ri(RAX, 1);
                         return true;
                     }
-                    if (!gen_expr_tag(e->args[0])) return false;
+                    if (!gen_expr_tag(e->kids().args[0])) return false;
                     a_.push_r(RAX); c_.depth += 8;
-                    if (!gen_expr_tag(e->args[1])) return false;
+                    if (!gen_expr_tag(e->kids().args[1])) return false;
                     a_.mov_rr(RCX, RAX);
                     a_.pop_r(RAX); c_.depth -= 8;
                     a_.alu_rr(0x09, RAX, RCX);
@@ -537,33 +658,33 @@ private:
         if (is_bool_expr(e)) return gen_bool_value(e);
         const NType t = type_of(e);
         if ((e->op == TokenType::SLASH || e->op == TokenType::PERCENT) && t == NType::Int &&
-            e->right->kind == ExprKind::Int && e->right->int_val >= 2 &&
-            type_of(e->left) == NType::Int) {
-            if (!gen_expr(e->left)) return false;
-            gen_div_const(e->right->int_val, e->op == TokenType::PERCENT);
+            e->kids().right->kind == ExprKind::Int && e->kids().right->int_val >= 2 &&
+            type_of(e->kids().left) == NType::Int) {
+            if (!gen_expr(e->kids().left)) return false;
+            gen_div_const(e->kids().right->int_val, e->op == TokenType::PERCENT);
             return true;
         }
         if (e->op == TokenType::SLASH) {
             if (t == NType::Float) {
-                if (!gen_operands(e->left, e->right, NType::Float)) return false;
+                if (!gen_operands(e->kids().left, e->kids().right, NType::Float)) return false;
                 const int ok = a_.new_label();
                 a_.xorpd(2, 2);
                 a_.ucomisd(1, 2);
                 a_.jcc(CC_P, ok);
                 a_.jcc(CC_NE, ok);
-                a_.jmp(c_.err_div);
+                a_.jmp(err_label(1));
                 a_.bind(ok);
                 a_.divsd(0, 1);
                 return true;
             }
-            if (!gen_operands(e->left, e->right, NType::Int)) return false;
+            if (!gen_operands(e->kids().left, e->kids().right, NType::Int)) return false;
             const int normal = a_.new_label(), done = a_.new_label();
             a_.alu_rr(0x85, RCX, RCX);
-            a_.jcc(CC_E, c_.err_div);
+            a_.jcc(CC_E, err_label(1));
             a_.alu_ri(7, RCX, -1);
             a_.jcc(CC_NE, normal);
             a_.neg_r(RAX);
-            a_.jcc(CC_O, c_.err_ovf);
+            a_.jcc(CC_O, err_label(9));
             a_.jmp(done);
             a_.bind(normal);
             a_.cqo();
@@ -573,17 +694,28 @@ private:
         }
         if (e->op == TokenType::PLUS || e->op == TokenType::MINUS || e->op == TokenType::STAR || e->op == TokenType::PERCENT) {
             if (t == NType::Int) {
-                if (!gen_operands(e->left, e->right, NType::Int)) return false;
+                if (e->op != TokenType::PERCENT && e->kids().right->kind == ExprKind::Int &&
+                    e->kids().right->int_val >= INT32_MIN && e->kids().right->int_val <= INT32_MAX) {
+                    if (!gen_to(e->kids().left, NType::Int)) return false;
+                    const int32_t imm = static_cast<int32_t>(e->kids().right->int_val);
+                    switch (e->op) {
+                        case TokenType::PLUS: a_.alu_ri(0, RAX, imm); a_.jcc(CC_O, err_label(4)); break;
+                        case TokenType::MINUS: a_.alu_ri(5, RAX, imm); a_.jcc(CC_O, err_label(6)); break;
+                        default: a_.imul_rri(RAX, RAX, imm); a_.jcc(CC_O, err_label(7)); break;
+                    }
+                    return true;
+                }
+                if (!gen_operands(e->kids().left, e->kids().right, NType::Int)) return false;
                 switch (e->op) {
-                    case TokenType::PLUS: a_.alu_rr(0x01, RAX, RCX); a_.jcc(CC_O, c_.err_ovf); break;
-                    case TokenType::MINUS: a_.alu_rr(0x29, RAX, RCX); a_.jcc(CC_O, c_.err_ovf); break;
-                    case TokenType::STAR: a_.imul_rr(RAX, RCX); a_.jcc(CC_O, c_.err_ovf); break;
+                    case TokenType::PLUS: a_.alu_rr(0x01, RAX, RCX); a_.jcc(CC_O, err_label(4)); break;
+                    case TokenType::MINUS: a_.alu_rr(0x29, RAX, RCX); a_.jcc(CC_O, err_label(6)); break;
+                    case TokenType::STAR: a_.imul_rr(RAX, RCX); a_.jcc(CC_O, err_label(7)); break;
                     default: return gen_mod();
                 }
                 return true;
             }
             if (e->op == TokenType::PERCENT) return fail("float modulo");
-            if (!gen_operands(e->left, e->right, NType::Float)) return false;
+            if (!gen_operands(e->kids().left, e->kids().right, NType::Float)) return false;
             switch (e->op) {
                 case TokenType::PLUS: a_.addsd(0, 1); break;
                 case TokenType::MINUS: a_.subsd(0, 1); break;
@@ -635,7 +767,7 @@ private:
         using namespace x64;
         const int ok = a_.new_label(), done = a_.new_label();
         a_.alu_rr(0x85, RCX, RCX);
-        a_.jcc(CC_E, c_.err_div);
+        a_.jcc(CC_E, err_label(12));
         a_.alu_ri(7, RCX, -1);
         a_.jcc(CC_NE, ok);
         a_.mov_ri(RAX, 0);
@@ -650,7 +782,14 @@ private:
 
     bool gen_call(const ExprPtr& e) {
         using namespace x64;
-        const std::string& name = e->callee->name;
+        const std::string& name = e->kids().callee->name;
+        if (name == kLenCall) {
+            if (!e->aux().native_fallback_func.empty()) return gen_fallback_len(e);
+            if (e->kids().args.size() != 1 || e->kids().args[0]->kind != ExprKind::Ident || !has_var("len_" + e->kids().args[0]->name))
+                return fail("len of something that is not an array parameter");
+            get_int("len_" + e->kids().args[0]->name, RAX);
+            return true;
+        }
         auto mit = math_whitelist().find(name);
         if (mit != math_whitelist().end()) return gen_math(e, name, mit->second);
         std::string key;
@@ -661,13 +800,17 @@ private:
             return gen_inline_call(e, callee);
         }
         int nslots = 0;
-        for (size_t i = 0; i < callee.sig.size(); i++) nslots += callee.sig[i] == 'A' || callee.sig[i] == 'M' ? 2 : 1;
-        int pad = (16 - ((c_.depth + nslots * 8) % 16)) % 16;
+        for (size_t i = 0; i < callee.sig.size(); i++)
+            nslots += callee.sig[i] == 'A' || callee.sig[i] == 'J' || callee.sig[i] == 'M' ? 2 : 1;
+        const int hidden_slots = fallback_needed_[key] ? 2 : 0;
+        const int total_slots = nslots + hidden_slots;
+        int pad = (16 - ((c_.depth + total_slots * 8) % 16)) % 16;
         if (pad) { a_.alu_ri(5, RSP, pad); c_.depth += pad; }
-        for (size_t i = 0; i < e->args.size(); i++) {
-            const ExprPtr& arg = e->args[i];
+        for (size_t i = 0; i < e->kids().args.size(); i++) {
+            const ExprPtr& arg = e->kids().args[i];
             switch (callee.sig[i]) {
-                case 'A': {
+                case 'A':
+                case 'J': {
                     if (arg->kind != ExprKind::Ident || !has_var(arg->name) || !has_var("len_" + arg->name))
                         return fail("array argument is not a plain array variable");
                     for (const std::string& part : {arg->name, "len_" + arg->name}) {
@@ -679,6 +822,12 @@ private:
                 }
                 case 'I':
                     if (!gen_expr(arg) || type_of(arg) != NType::Int) return fail("non-int argument for an int parameter");
+                    a_.push_r(RAX); c_.depth += 8;
+                    break;
+                case 'O':
+                    if (arg->kind != ExprKind::Ident || local_type(arg->name) != NType::Opaque)
+                        return fail("interpreter values may only be forwarded unchanged");
+                    get_int(arg->name, RAX);
                     a_.push_r(RAX); c_.depth += 8;
                     break;
                 default:
@@ -709,6 +858,11 @@ private:
                 }
             }
         }
+        if (hidden_slots) {
+            if (!c_.needs_fallback) return fail("missing interpreter fallback context");
+            a_.push_m(RBP, c_.context_slot); c_.depth += 8;
+            a_.push_m(RBP, c_.fallback_slot); c_.depth += 8;
+        }
         a_.inc_r(R13);
         a_.call(fn_label_.at(key));
         if (returns_maybe_int(callee)) {
@@ -717,8 +871,8 @@ private:
             a_.mov_mr(RBP, tag->second, RDX);
         }
         a_.dec_r(R13);
-        a_.alu_ri(0, RSP, nslots * 8 + pad);
-        c_.depth -= nslots * 8 + pad;
+        a_.alu_ri(0, RSP, total_slots * 8 + pad);
+        c_.depth -= total_slots * 8 + pad;
         err_check();
         return true;
     }
@@ -727,23 +881,26 @@ private:
     static constexpr int kMaxInlineExpansions = 32;
     static constexpr int kMaxInlineNodes = 56;
     std::unordered_map<std::string, int> inline_ok_;
+    std::vector<x64::Site> sites_;
+    std::map<std::tuple<std::string, std::string, int, int>, int> site_index_;
+    std::string empty_file_;
 
     static int count_expr(const ExprPtr& e) {
         if (!e) return 0;
         int n = 1;
-        n += count_expr(e->left) + count_expr(e->right) + count_expr(e->operand) + count_expr(e->target) +
-             count_expr(e->value) + count_expr(e->index) + count_expr(e->object);
-        for (const auto& a : e->args) n += count_expr(a);
+        n += count_expr(e->kids().left) + count_expr(e->kids().right) + count_expr(e->kids().operand) + count_expr(e->kids().target) +
+             count_expr(e->kids().value) + count_expr(e->kids().index) + count_expr(e->kids().object);
+        for (const auto& a : e->kids().args) n += count_expr(a);
         return n;
     }
     static bool leaf_expr_ok(const ExprPtr& e) {
         if (!e) return true;
         if (e->kind == ExprKind::Call) {
-            if (!e->callee || e->callee->kind != ExprKind::Ident || !math_whitelist().count(e->callee->name)) return false;
+            if (!e->kids().callee || e->kids().callee->kind != ExprKind::Ident || !builtin_call_name(e->kids().callee->name)) return false;
         }
-        if (!leaf_expr_ok(e->left) || !leaf_expr_ok(e->right) || !leaf_expr_ok(e->operand) || !leaf_expr_ok(e->target) ||
-            !leaf_expr_ok(e->value) || !leaf_expr_ok(e->index) || !leaf_expr_ok(e->object)) return false;
-        for (const auto& a : e->args) if (!leaf_expr_ok(a)) return false;
+        if (!leaf_expr_ok(e->kids().left) || !leaf_expr_ok(e->kids().right) || !leaf_expr_ok(e->kids().operand) || !leaf_expr_ok(e->kids().target) ||
+            !leaf_expr_ok(e->kids().value) || !leaf_expr_ok(e->kids().index) || !leaf_expr_ok(e->kids().object)) return false;
+        for (const auto& a : e->kids().args) if (!leaf_expr_ok(a)) return false;
         return true;
     }
     static bool leaf_stmts_ok(const std::vector<StmtPtr>& body, int& nodes) {
@@ -763,8 +920,8 @@ private:
                 case StmtKind::If:
                     if (!leaf_expr_ok(s->cond)) return false;
                     nodes += count_expr(s->cond);
-                    if (!leaf_stmts_ok(s->then_body, nodes) || !leaf_stmts_ok(s->else_body, nodes)) return false;
-                    for (const auto& el : s->elifs) {
+                    if (!leaf_stmts_ok(s->aux().then_body, nodes) || !leaf_stmts_ok(s->aux().else_body, nodes)) return false;
+                    for (const auto& el : s->aux().elifs) {
                         if (!leaf_expr_ok(el.first)) return false;
                         nodes += count_expr(el.first);
                         if (!leaf_stmts_ok(el.second, nodes)) return false;
@@ -784,7 +941,8 @@ private:
         const FnInfo& f = fns_.at(key);
         bool has_mixed_local = false;
         for (const auto& entry : f.seen) if ((entry.second & 3) == 3) has_mixed_local = true;
-        bool ok = !has_mixed_local && f.sig.find('M') == std::string::npos && !returns_maybe_int(f) &&
+        bool ok = !has_mixed_local && f.sig.find('M') == std::string::npos &&
+                  f.sig.find_first_of("AJO") == std::string::npos && !returns_maybe_int(f) &&
                   leaf_stmts_ok(f.decl->body, nodes) && nodes <= kMaxInlineNodes;
         inline_ok_[key] = ok ? 1 : 0;
         return ok;
@@ -796,7 +954,7 @@ private:
         std::vector<std::string> names;
         for (const auto& kv : callee.local_types) {
             names.push_back(kv.first);
-            if (kv.second == NType::Array) names.push_back("len_" + kv.first);
+            if (is_array_type(kv.second)) names.push_back("len_" + kv.first);
         }
         std::sort(names.begin(), names.end());
         for (const auto& n : names) {
@@ -806,12 +964,13 @@ private:
             v.slot = new_slot();
             frame[n] = v;
         }
-        for (size_t i = 0; i < e->args.size(); i++) {
-            const ExprPtr& arg = e->args[i];
+        for (size_t i = 0; i < e->kids().args.size(); i++) {
+            const ExprPtr& arg = e->kids().args[i];
             const std::string& p = callee.param_names[i];
             const NType lt = callee.local_types.at(p);
             switch (callee.sig[i]) {
                 case 'A':
+                case 'J':
                     if (arg->kind != ExprKind::Ident || !has_var(arg->name) || !has_var("len_" + arg->name))
                         return fail("array argument is not a plain array variable");
                     get_int(arg->name, RAX);
@@ -850,7 +1009,7 @@ private:
             for (const auto& n : names) {
                 if (n.compare(0, 4, "len_") == 0) continue;
                 if (std::find(callee.param_names.begin(), callee.param_names.end(), n) != callee.param_names.end()) continue;
-                if (callee.local_types.at(n) == NType::Array) return fail("array local in an inlined function");
+                if (is_array_type(callee.local_types.at(n))) return fail("array local in an inlined function");
                 zero.push_back(n);
             }
             if (!zero.empty()) a_.mov_ri(RAX, 0);
@@ -914,20 +1073,68 @@ private:
         }
     }
 
+    bool gen_fallback_len(const ExprPtr& e) {
+        using namespace x64;
+        if (e->kids().args.size() != 1 || e->kids().args[0]->kind != ExprKind::Ident ||
+            local_type(e->kids().args[0]->name) != NType::Opaque) return fail("invalid interpreter fallback capture");
+        auto fallback = fallback_indices_.find(e->aux().native_fallback_func);
+        if (fallback == fallback_indices_.end()) return fail("missing interpreter fallback function");
+        std::vector<std::pair<int, int>> spills;
+        for (int encoded : c_.used_regs) {
+            const int slot = new_slot();
+            spills.emplace_back(encoded, slot);
+            if (encoded & 256) a_.movsd_store(RBP, slot, encoded & 255);
+            else a_.mov_mr(RBP, slot, encoded & 255);
+        }
+        bool padded;
+        align_call_begin(padded);
+        get_int(e->kids().args[0]->name, RDX);
+        a_.mov_rm(RDI, RBP, c_.context_slot);
+        a_.mov_ri(RSI, fallback->second);
+        a_.mov_rr(RCX, R12);
+        a_.mov_rm(RAX, RBP, c_.fallback_slot);
+        a_.call_r(RAX);
+        align_call_end(padded);
+        for (const auto& spill : spills) {
+            const int encoded = spill.first, slot = spill.second;
+            if (encoded & 256) a_.movsd_load(encoded & 255, RBP, slot);
+            else a_.mov_rm(encoded & 255, RBP, slot);
+        }
+        err_check();
+        return true;
+    }
+
     bool gen_math(const ExprPtr& e, const std::string& name, const MathBuiltin& mb) {
         using namespace x64;
+        if (mb.kind == MathKind::ToInt) {
+            if (e->kids().args.empty()) { a_.mov_ri(RAX, 0); return true; }
+            if (type_of(e->kids().args[0]) == NType::Int) return gen_expr(e->kids().args[0]);
+            if (!gen_to(e->kids().args[0], NType::Float)) return false;
+            a_.ucomisd(0, 0);
+            a_.jcc(CC_P, err_label(10));
+            a_.mov_ri(RAX, (int64_t)bits(0x1p63));
+            a_.movq_xr(1, RAX);
+            a_.ucomisd(0, 1);
+            a_.jcc(CC_AE, err_label(10));
+            a_.mov_ri(RAX, (int64_t)bits(-0x1p63));
+            a_.movq_xr(1, RAX);
+            a_.ucomisd(0, 1);
+            a_.jcc(CC_B, err_label(10));
+            a_.cvttsd2si(RAX, 0);
+            return true;
+        }
         if (mb.kind == MathKind::Promote2) {
-            const NType ta = type_of(e->args[0]), tb = type_of(e->args[1]);
+            const NType ta = type_of(e->kids().args[0]), tb = type_of(e->kids().args[1]);
             if (ta == NType::Float || tb == NType::Float) {
-                if (!gen_to(e->args[0], NType::Float)) return false;
+                if (!gen_to(e->kids().args[0], NType::Float)) return false;
                 push_val(NType::Float);
-                if (!gen_to(e->args[1], NType::Float)) return false;
+                if (!gen_to(e->kids().args[1], NType::Float)) return false;
                 a_.movapd(1, 0);
                 pop_val(NType::Float);
                 call_helper(name == "max" ? H_FMAX : H_FMIN);
                 return true;
             }
-            if (!gen_operands(e->args[0], e->args[1], NType::Int)) return false;
+            if (!gen_operands(e->kids().args[0], e->kids().args[1], NType::Int)) return false;
             const int keep = a_.new_label();
             a_.alu_rr(0x39, RAX, RCX);
             a_.jcc(name == "max" ? CC_GE : CC_LE, keep);
@@ -935,13 +1142,13 @@ private:
             a_.bind(keep);
             return true;
         }
-        if (name == "sqrt" && e->args.size() == 1) {
-            if (!gen_to(e->args[0], NType::Float)) return false;
+        if (name == "sqrt" && e->kids().args.size() == 1) {
+            if (!gen_to(e->kids().args[0], NType::Float)) return false;
             a_.sqrtsd(0, 0);
             return true;
         }
-        if (name == "abs" && e->args.size() == 1) {
-            if (!gen_to(e->args[0], NType::Float)) return false;
+        if (name == "abs" && e->kids().args.size() == 1) {
+            if (!gen_to(e->kids().args[0], NType::Float)) return false;
             a_.mov_ri(RAX, INT64_MAX);
             a_.movq_xr(1, RAX);
             a_.andpd(0, 1);
@@ -949,9 +1156,9 @@ private:
         }
         const int id = helper_for(name);
         if (id < 0) return fail("math builtin '" + name + "' has no machine-code helper");
-        const size_t n = e->args.size();
+        const size_t n = e->kids().args.size();
         for (size_t i = 0; i < n; i++) {
-            if (!gen_to(e->args[i], NType::Float)) return false;
+            if (!gen_to(e->kids().args[i], NType::Float)) return false;
             push_val(NType::Float);
         }
         for (size_t k = n; k-- > 0;) {
@@ -964,11 +1171,12 @@ private:
 
     bool gen_index_read(const ExprPtr& e) {
         using namespace x64;
-        const std::string& name = e->object->name;
+        const std::string& name = e->kids().object->name;
         if (!has_var("len_" + name)) return fail("index of a non-array");
-        if (!gen_index_value(e->index)) return false;
+        if (!gen_index_value(e->kids().index)) return false;
         const int base = emit_bounds_and_base(name);
-        a_.movsd_load_idx(0, base, RAX);
+        if (local_type(name) == NType::I64Array) a_.mov_rm_idx(RAX, base, RAX);
+        else a_.movsd_load_idx(0, base, RAX);
         return true;
     }
 
@@ -985,10 +1193,11 @@ private:
         a_.alu_rr(0x39, RAX, RDX);
         a_.jcc(CC_B, ok);
         a_.alu_rr(0x85, RAX, RAX);
-        a_.jcc(CC_NS, c_.err_idx);
+        const int idx_label = err_label(local_type(name) == NType::I64Array ? 13 : 3);
+        a_.jcc(CC_NS, idx_label);
         a_.alu_rr(0x01, RAX, RDX);
         a_.alu_rr(0x39, RAX, RDX);
-        a_.jcc(CC_AE, c_.err_idx);
+        a_.jcc(CC_AE, idx_label);
         a_.bind(ok);
         const Var& d = var(name);
         if (d.reg >= 0) return d.reg;
@@ -1047,23 +1256,34 @@ private:
         using namespace x64;
         if (e->kind == ExprKind::Binary && (e->op == TokenType::AND || e->op == TokenType::OR)) {
             const int mid = a_.new_label();
-            if (e->op == TokenType::AND) { if (!gen_cond(e->left, mid, f, mid)) return false; }
-            else { if (!gen_cond(e->left, t, mid, mid)) return false; }
+            if (e->op == TokenType::AND) { if (!gen_cond(e->kids().left, mid, f, mid)) return false; }
+            else { if (!gen_cond(e->kids().left, t, mid, mid)) return false; }
             a_.bind(mid);
-            return gen_cond(e->right, t, f, next);
+            return gen_cond(e->kids().right, t, f, next);
         }
-        if (e->kind == ExprKind::Unary && e->op != TokenType::MINUS) return gen_cond(e->operand, f, t, next);
+        if (e->kind == ExprKind::Unary && e->op != TokenType::MINUS) return gen_cond(e->kids().operand, f, t, next);
         if (e->kind == ExprKind::Binary && (e->op == TokenType::LT || e->op == TokenType::GT || e->op == TokenType::LE ||
                                             e->op == TokenType::GE || e->op == TokenType::EQ || e->op == TokenType::NEQ)) {
-            const bool fl = type_of(e->left) == NType::Float || type_of(e->right) == NType::Float;
-            if (!fl && e->right->kind == ExprKind::Int && e->right->int_val >= INT32_MIN && e->right->int_val <= INT32_MAX) {
-                if (!gen_to(e->left, NType::Int)) return false;
-                if (e->right->int_val == 0) a_.alu_rr(0x85, RAX, RAX);
-                else a_.alu_ri(7, RAX, (int32_t)e->right->int_val);
+            const bool fl = type_of(e->kids().left) == NType::Float || type_of(e->kids().right) == NType::Float;
+            if (fl) {
+                const bool left_int = type_of(e->kids().left) == NType::Int;
+                const bool right_int = type_of(e->kids().right) == NType::Int;
+                if (left_int || right_int) {
+                    const ExprPtr& int_side = left_int ? e->kids().left : e->kids().right;
+                    const bool small_literal = int_side->kind == ExprKind::Int &&
+                                               int_side->int_val >= -9007199254740992LL &&
+                                               int_side->int_val <= 9007199254740992LL;
+                    if (!small_literal) return fail("comparing an int with a float needs exact semantics");
+                }
+            }
+            if (!fl && e->kids().right->kind == ExprKind::Int && e->kids().right->int_val >= INT32_MIN && e->kids().right->int_val <= INT32_MAX) {
+                if (!gen_to(e->kids().left, NType::Int)) return false;
+                if (e->kids().right->int_val == 0) a_.alu_rr(0x85, RAX, RAX);
+                else a_.alu_ri(7, RAX, (int32_t)e->kids().right->int_val);
                 branch_cc(int_cc(e->op), t, f, next);
                 return true;
             }
-            if (!gen_operands(e->left, e->right, fl ? NType::Float : NType::Int)) return false;
+            if (!gen_operands(e->kids().left, e->kids().right, fl ? NType::Float : NType::Int)) return false;
             if (!fl) {
                 a_.alu_rr(0x39, RAX, RCX);
                 branch_cc(int_cc(e->op), t, f, next);
@@ -1090,7 +1310,7 @@ private:
 
     bool store_scalar(const std::string& name, NType value_type) {
         const NType tt = local_type(name);
-        if (tt == NType::Array) return fail("assignment to an array variable");
+        if (is_array_type(tt)) return fail("assignment to an array variable");
         if (tt == NType::Float) {
             if (value_type == NType::Int) a_.cvtsi2sd(0, x64::RAX);
             put_float(name, 0);
@@ -1108,9 +1328,39 @@ private:
 
     bool gen_array_store(const ExprPtr& target, const ExprPtr& value, int compound  ) {
         using namespace x64;
-        const std::string& name = target->object->name;
+        const std::string& name = target->kids().object->name;
         if (!has_var("len_" + name)) return fail("index of a non-array");
-        if (!gen_index_value(target->index)) return false;
+        if (!gen_index_value(target->kids().index)) return false;
+        if (local_type(name) == NType::I64Array) {
+            a_.push_r(RAX); c_.depth += 8;
+            if (!gen_to(value, NType::Int)) return false;
+            a_.mov_rr(RCX, RAX);
+            a_.pop_r(RAX); c_.depth -= 8;
+            const int base = emit_bounds_and_base(name);
+            if (compound == 0) {
+                a_.mov_mr_idx(base, RAX, RCX);
+            } else {
+                const int base_slot = new_slot();
+                const int index_slot = new_slot();
+                const int value_slot = new_slot();
+                a_.mov_mr(RBP, base_slot, base);
+                a_.mov_mr(RBP, index_slot, RAX);
+                a_.mov_rm_idx(RDX, base, RAX);
+                if (compound == 1) {
+                    a_.alu_rr(0x01, RDX, RCX);
+                    a_.jcc(CC_O, err_label(4));
+                } else {
+                    a_.alu_rr(0x29, RDX, RCX);
+                    a_.jcc(CC_O, err_label(6));
+                }
+                a_.mov_mr(RBP, value_slot, RDX);
+                a_.mov_rm(RAX, RBP, base_slot);
+                a_.mov_rm(RCX, RBP, index_slot);
+                a_.mov_rm(RDX, RBP, value_slot);
+                a_.mov_mr_idx(RAX, RCX, RDX);
+            }
+            return true;
+        }
         if (is_simple(value)) {
             a_.mov_rr(RCX, RAX);
             if (!load_simple(value, NType::Float, RAX, 0)) return false;
@@ -1144,7 +1394,7 @@ private:
         if (!idx) return false;
         if (idx->kind == ExprKind::Ident) { off = 0; return idx->name == loop_var; }
         if (idx->kind != ExprKind::Binary || idx->op != TokenType::PLUS) return false;
-        const ExprPtr& l = idx->left; const ExprPtr& r = idx->right;
+        const ExprPtr& l = idx->kids().left; const ExprPtr& r = idx->kids().right;
         const ExprPtr* var = nullptr; const ExprPtr* lit = nullptr;
         if (l && r && l->kind == ExprKind::Ident && r->kind == ExprKind::Int) { var = &l; lit = &r; }
         else if (l && r && r->kind == ExprKind::Ident && l->kind == ExprKind::Int) { var = &r; lit = &l; }
@@ -1158,11 +1408,11 @@ private:
             case ExprKind::Float: return 1;
             case ExprKind::Int: return int_leaf_ok ? 1 : 0;
             case ExprKind::Index: {
-                if (!e->object || e->object->kind != ExprKind::Ident) return 0;
-                const std::string& name = e->object->name;
+                if (!e->kids().object || e->kids().object->kind != ExprKind::Ident) return 0;
+                const std::string& name = e->kids().object->name;
                 if (name == plan.target || !has_var("len_" + name) || !has_var(name)) return 0;
                 int off = 0;
-                if (!vec_index(e->index, loop_var, off)) return 0;
+                if (!vec_index(e->kids().index, loop_var, off)) return 0;
                 auto it = plan.reads.find(name);
                 if (it == plan.reads.end()) plan.reads[name] = off; else it->second = std::max(it->second, off);
                 return 1;
@@ -1170,8 +1420,8 @@ private:
             case ExprKind::Binary: {
                 if (e->op != TokenType::PLUS && e->op != TokenType::MINUS && e->op != TokenType::STAR) return 0;
                 if (type_of(e) != NType::Float) return 0;
-                const int l = vec_expr_ok(e->left, plan, loop_var, true, nodes);
-                const int r = vec_expr_ok(e->right, plan, loop_var, true, nodes);
+                const int l = vec_expr_ok(e->kids().left, plan, loop_var, true, nodes);
+                const int r = vec_expr_ok(e->kids().right, plan, loop_var, true, nodes);
                 if (!l || !r) return 0;
                 return std::max(l, r + 1);
             }
@@ -1184,18 +1434,18 @@ private:
         ExprPtr assign;
         if (st.kind == StmtKind::VarDecl) assign = st.expr;
         else if (st.kind == StmtKind::ExprStmt && st.expr && st.expr->kind == ExprKind::Assign) assign = st.expr;
-        if (!assign || !assign->target || assign->target->kind != ExprKind::Index || !assign->value) return false;
-        const ExprPtr& t = assign->target;
-        if (!t->object || t->object->kind != ExprKind::Ident) return false;
-        plan.target = t->object->name;
+        if (!assign || !assign->kids().target || assign->kids().target->kind != ExprKind::Index || !assign->kids().value) return false;
+        const ExprPtr& t = assign->kids().target;
+        if (!t->kids().object || t->kids().object->kind != ExprKind::Ident) return false;
+        plan.target = t->kids().object->name;
         if (!has_var(plan.target) || !has_var("len_" + plan.target)) return false;
-        if (!vec_index(t->index, s->loop_var, plan.target_off)) return false;
-        if (!has_var(s->loop_var) || local_type(s->loop_var) != NType::Int || has_dynamic_tag(*c_.fn, s->loop_var)) return false;
-        if (type_of(assign->value) != NType::Float) return false;
+        if (!vec_index(t->kids().index, s->aux().loop_var, plan.target_off)) return false;
+        if (!has_var(s->aux().loop_var) || local_type(s->aux().loop_var) != NType::Int || has_dynamic_tag(*c_.fn, s->aux().loop_var)) return false;
+        if (type_of(assign->kids().value) != NType::Float) return false;
         int nodes = 0;
-        const int need = vec_expr_ok(assign->value, plan, s->loop_var, false, nodes);
+        const int need = vec_expr_ok(assign->kids().value, plan, s->aux().loop_var, false, nodes);
         if (need == 0 || need > 8 || plan.reads.empty() || plan.reads.size() > 6) return false;
-        plan.value = assign->value;
+        plan.value = assign->kids().value;
         return true;
     }
     void vec_gen(const ExprPtr& e, int k) {
@@ -1211,14 +1461,14 @@ private:
             }
             case ExprKind::Index: {
                 int off = 0;
-                vec_index(e->index, vec_loop_var_, off);
-                get_int(e->object->name, RCX);
+                vec_index(e->kids().index, vec_loop_var_, off);
+                get_int(e->kids().object->name, RCX);
                 a_.movupd_load_idx(k, RCX, RAX, off * 8);
                 return;
             }
             default: {
-                vec_gen(e->left, k);
-                vec_gen(e->right, k + 1);
+                vec_gen(e->kids().left, k);
+                vec_gen(e->kids().right, k + 1);
                 if (e->op == TokenType::PLUS) a_.addpd(k, k + 1);
                 else if (e->op == TokenType::MINUS) a_.subpd(k, k + 1);
                 else a_.mulpd(k, k + 1);
@@ -1229,7 +1479,7 @@ private:
     std::string vec_loop_var_;
     void vec_emit(const VecPlan& p, const StmtPtr& s, const std::string& cn, const std::string& bn, int top) {
         using namespace x64;
-        vec_loop_var_ = s->loop_var;
+        vec_loop_var_ = s->aux().loop_var;
         dbg("own x86-64 backend: element-wise loop at line " + std::to_string(s->tok.line) + " has a vector fast path");
         get_int(bn, RAX);
         a_.alu_ri(7, RAX, 4);
@@ -1274,40 +1524,53 @@ private:
         a_.bind(vdone);
         put_int(cn, RAX);
         a_.alu_ri(5, RAX, 1);
-        store_scalar(s->loop_var, NType::Int);
+        store_scalar(s->aux().loop_var, NType::Int);
     }
 
     bool gen_stmt(const StmtPtr& s) {
+        if (!s) return true;
+        const bool scoped = s->expr != nullptr;
+        if (scoped) {
+            const bool index_store = s->expr->kind == ExprKind::Assign &&
+                                     s->expr->kids().target && s->expr->kids().target->kind == ExprKind::Index;
+            c_.toks.push_back(index_store ? &s->expr->kids().target->tok : &s->expr->tok);
+        }
+        const bool ok = gen_stmt_raw(s);
+        if (scoped) c_.toks.pop_back();
+        return ok;
+    }
+
+    bool gen_stmt_raw(const StmtPtr& s) {
         using namespace x64;
         if (!s) return true;
         switch (s->kind) {
             case StmtKind::VarDecl: {
-                const ExprPtr& target = s->expr->target;
-                if (target->kind == ExprKind::Index) return gen_array_store(target, s->expr->value, 0);
-                if (!gen_expr(s->expr->value)) return false;
-                if (!store_scalar(target->name, type_of(s->expr->value))) return false;
+                const ExprPtr& target = s->expr->kids().target;
+                if (target->kind == ExprKind::Index) return gen_array_store(target, s->expr->kids().value, 0);
+                if (!gen_expr(s->expr->kids().value)) return false;
+                if (!store_scalar(target->name, type_of(s->expr->kids().value))) return false;
                 if (has_dynamic_tag(*c_.fn, target->name)) {
-                    if (!gen_expr_tag(s->expr->value)) return false;
+                    if (!gen_expr_tag(s->expr->kids().value)) return false;
                     put_tag(target->name);
                 }
                 return true;
             }
             case StmtKind::ExprStmt: {
-                if (s->expr->kind == ExprKind::Assign) return gen_array_store(s->expr->target, s->expr->value, 0);
-                if (s->expr->target->kind == ExprKind::Index)
-                    return gen_array_store(s->expr->target, s->expr->value, s->expr->op == TokenType::MINUS_EQ ? 2 : 1);
+                if (s->expr->kind == ExprKind::Assign) return gen_array_store(s->expr->kids().target, s->expr->kids().value, 0);
+                if (s->expr->kids().target->kind == ExprKind::Index)
+                    return gen_array_store(s->expr->kids().target, s->expr->kids().value, s->expr->op == TokenType::MINUS_EQ ? 2 : 1);
                 auto tmp = std::make_shared<Expr>();
                 tmp->kind = ExprKind::Binary;
                 tmp->op = s->expr->op == TokenType::PLUS_EQ ? TokenType::PLUS : TokenType::MINUS;
-                tmp->left = s->expr->target;
-                tmp->right = s->expr->value;
-                if (local_type(s->expr->target->name) == NType::Int && type_of(s->expr->value) != NType::Int)
+                tmp->kids_mut().left = s->expr->kids_mut().target;
+                tmp->kids_mut().right = s->expr->kids_mut().value;
+                if (local_type(s->expr->kids().target->name) == NType::Int && type_of(s->expr->kids().value) != NType::Int)
                     return fail("float added into an int variable");
                 if (!gen_expr(tmp)) return false;
-                if (!store_scalar(s->expr->target->name, type_of(tmp))) return false;
-                if (has_dynamic_tag(*c_.fn, s->expr->target->name)) {
+                if (!store_scalar(s->expr->kids().target->name, type_of(tmp))) return false;
+                if (has_dynamic_tag(*c_.fn, s->expr->kids().target->name)) {
                     if (!gen_expr_tag(tmp)) return false;
-                    put_tag(s->expr->target->name);
+                    put_tag(s->expr->kids().target->name);
                 }
                 return true;
             }
@@ -1316,33 +1579,33 @@ private:
                 int next = a_.new_label(), then_l = a_.new_label();
                 if (!gen_cond(s->cond, then_l, next, then_l)) return false;
                 a_.bind(then_l);
-                if (!gen_stmts(s->then_body)) return false;
-                if (!s->elifs.empty() || !s->else_body.empty()) a_.jmp(end);
-                for (const auto& el : s->elifs) {
+                if (!gen_stmts(s->aux().then_body)) return false;
+                if (!s->aux().elifs.empty() || !s->aux().else_body.empty()) a_.jmp(end);
+                for (const auto& el : s->aux().elifs) {
                     a_.bind(next);
                     next = a_.new_label();
                     const int body_l = a_.new_label();
                     if (!gen_cond(el.first, body_l, next, body_l)) return false;
                     a_.bind(body_l);
                     if (!gen_stmts(el.second)) return false;
-                    if (&el != &s->elifs.back() || !s->else_body.empty()) a_.jmp(end);
+                    if (&el != &s->aux().elifs.back() || !s->aux().else_body.empty()) a_.jmp(end);
                 }
                 a_.bind(next);
-                if (!s->else_body.empty() && !gen_stmts(s->else_body)) return false;
+                if (!s->aux().else_body.empty() && !gen_stmts(s->aux().else_body)) return false;
                 a_.bind(end);
                 return true;
             }
             case StmtKind::While: {
-                const int top = a_.new_label(), body = a_.new_label(), end = a_.new_label();
-                a_.bind(top);
-                if (!gen_cond(s->cond, body, end, body)) return false;
+                const int condition = a_.new_label(), body = a_.new_label(), end = a_.new_label();
+                a_.jmp(condition);
                 a_.bind(body);
-                c_.loops.push_back({top, end});
+                c_.loops.push_back({condition, end});
                 loop_enter();
                 const bool ok = gen_stmts(s->body);
                 c_.loops.pop_back();
                 if (!ok) return false;
-                a_.jmp(top);
+                a_.bind(condition);
+                if (!gen_cond(s->cond, body, end, end)) return false;
                 a_.bind(end);
                 loop_leave(false);
                 return true;
@@ -1350,14 +1613,14 @@ private:
             case StmtKind::For: {
                 const int id = c_.loop_ids.at(s.get());
                 const std::string cn = "@c" + std::to_string(id), bn = "@b" + std::to_string(id);
-                const ExprPtr& bexpr = s->iterable->args[0];
+                const ExprPtr& bexpr = s->aux().iterable->kids().args[0];
                 if (!gen_expr(bexpr)) return false;
                 if (type_of(bexpr) == NType::Float) call_helper(H_BOUND_F_ID());
                 put_int(bn, RAX);
                 a_.mov_ri(RAX, 0);
                 put_int(cn, RAX);
-                if (!has_var(s->loop_var) || local_type(s->loop_var) == NType::Array) return fail("loop variable");
-                const int top = a_.new_label(), cont = a_.new_label(), end = a_.new_label();
+                if (!has_var(s->aux().loop_var) || is_array_type(local_type(s->aux().loop_var))) return fail("loop variable");
+                const int top = a_.new_label(), body = a_.new_label(), cont = a_.new_label(), end = a_.new_label();
                 bool is_vec = false;
                 {
                     VecPlan plan;
@@ -1371,10 +1634,11 @@ private:
                 const Var& bv = var(bn);
                 if (bv.reg >= 0) a_.alu_rr(0x39, RAX, bv.reg); else a_.cmp_rm(RAX, RBP, bv.slot);
                 a_.jcc(CC_GE, end);
-                if (!store_scalar(s->loop_var, NType::Int)) return false;
-                if (has_dynamic_tag(*c_.fn, s->loop_var)) {
+                a_.bind(body);
+                if (!store_scalar(s->aux().loop_var, NType::Int)) return false;
+                if (has_dynamic_tag(*c_.fn, s->aux().loop_var)) {
                     a_.mov_ri(RAX, 0);
-                    put_tag(s->loop_var);
+                    put_tag(s->aux().loop_var);
                 }
                 c_.loops.push_back({cont, end});
                 const bool ok = gen_stmts(s->body);
@@ -1383,7 +1647,9 @@ private:
                 a_.bind(cont);
                 const Var& cv = var(cn);
                 if (cv.reg >= 0) a_.inc_r(cv.reg); else a_.inc_m(RBP, cv.slot);
-                a_.jmp(top);
+                get_int(cn, RAX);
+                if (bv.reg >= 0) a_.alu_rr(0x39, RAX, bv.reg); else a_.cmp_rm(RAX, RBP, bv.slot);
+                a_.jcc(CC_L, body);
                 a_.bind(end);
                 loop_leave(profitable);
                 return true;
@@ -1402,13 +1668,6 @@ private:
                     if (c_.inline_exit >= 0) { a_.jmp(c_.inline_exit); return true; }
                 } else {
                     if (c_.inline_exit >= 0) { a_.jmp(c_.inline_exit); return true; }
-                    {
-                        const int inner = a_.new_label();
-                        a_.alu_rr(0x85, R13, R13);
-                        a_.jcc(CC_NE, inner);
-                        a_.mov_m32_imm(R14, 0, t == NType::Float ? 1 : 0);
-                        a_.bind(inner);
-                    }
                 }
                 a_.jmp(c_.epilogue);
                 return true;
@@ -1439,21 +1698,21 @@ private:
                 if (c_.fn->local_types.count(e->name)) w[e->name] += m;
                 return;
             case ExprKind::Index:
-                if (e->object && e->object->kind == ExprKind::Ident) {
-                    w[e->object->name] += m;
-                    w["len_" + e->object->name] += m;
+                if (e->kids().object && e->kids().object->kind == ExprKind::Ident) {
+                    w[e->kids().object->name] += m;
+                    w["len_" + e->kids().object->name] += m;
                 }
-                weigh_expr(e->index, m, w);
+                weigh_expr(e->kids().index, m, w);
                 return;
             case ExprKind::Call:
-                for (const auto& arg : e->args) {
+                for (const auto& arg : e->kids().args) {
                     if (arg && arg->kind == ExprKind::Ident && is_array_name(arg->name)) { w[arg->name] += m; w["len_" + arg->name] += m; }
                     else weigh_expr(arg, m, w);
                 }
                 return;
             default:
-                weigh_expr(e->left, m, w); weigh_expr(e->right, m, w); weigh_expr(e->operand, m, w);
-                weigh_expr(e->target, m, w); weigh_expr(e->value, m, w);
+                weigh_expr(e->kids().left, m, w); weigh_expr(e->kids().right, m, w); weigh_expr(e->kids().operand, m, w);
+                weigh_expr(e->kids().target, m, w); weigh_expr(e->kids().value, m, w);
                 return;
         }
     }
@@ -1465,14 +1724,14 @@ private:
             switch (s->kind) {
                 case StmtKind::VarDecl:
                 case StmtKind::ExprStmt:
-                    weigh_expr(s->expr->target, m, w);
-                    weigh_expr(s->expr->value, m, w);
+                    weigh_expr(s->expr->kids().target, m, w);
+                    weigh_expr(s->expr->kids().value, m, w);
                     break;
                 case StmtKind::If:
                     weigh_expr(s->cond, m, w);
-                    weigh_stmts(s->then_body, m, w, next_loop);
-                    for (const auto& el : s->elifs) { weigh_expr(el.first, m, w); weigh_stmts(el.second, m, w, next_loop); }
-                    weigh_stmts(s->else_body, m, w, next_loop);
+                    weigh_stmts(s->aux().then_body, m, w, next_loop);
+                    for (const auto& el : s->aux().elifs) { weigh_expr(el.first, m, w); weigh_stmts(el.second, m, w, next_loop); }
+                    weigh_stmts(s->aux().else_body, m, w, next_loop);
                     break;
                 case StmtKind::While:
                     weigh_expr(s->cond, inner, w);
@@ -1483,8 +1742,8 @@ private:
                     c_.loop_ids[s.get()] = id;
                     w["@c" + std::to_string(id)] += 3 * inner;
                     w["@b" + std::to_string(id)] += inner;
-                    w[s->loop_var] += inner;
-                    weigh_expr(s->iterable->args[0], m, w);
+                    w[s->aux().loop_var] += inner;
+                    weigh_expr(s->aux().iterable->kids().args[0], m, w);
                     weigh_stmts(s->body, inner, w, next_loop);
                     break;
                 }
@@ -1497,10 +1756,124 @@ private:
         }
     }
 
+    void plan_registers() {
+        std::unordered_map<std::string, std::unordered_set<std::string>> edges;
+        std::unordered_map<std::string, std::unordered_set<std::string>> reachable;
+        for (const auto& [key, fn] : fns_) {
+            all_stmt_exprs(fn.decl->body, [&](const ExprPtr& root) {
+                return expr_tree_all(root, [&](const ExprPtr& e) {
+                    if (e && e->kind == ExprKind::Call) {
+                        std::string callee;
+                        if (callee_key(fns_, fn, e, callee) && fns_.count(callee)) {
+                            edges[key].insert(callee);
+                        }
+                    }
+                    return true;
+                });
+            });
+        }
+        for (const auto& [key, fn] : fns_) {
+            std::vector<std::string> pending(edges[key].begin(), edges[key].end());
+            while (!pending.empty()) {
+                std::string current = std::move(pending.back());
+                pending.pop_back();
+                if (!reachable[key].insert(current).second) continue;
+                for (const auto& callee : edges[current]) pending.push_back(callee);
+            }
+        }
+        std::unordered_set<std::string> special;
+        for (const auto& [key, fn] : fns_)
+            if (reachable[key].count(key) || fallback_needed_[key]) special.insert(key);
+        std::unordered_set<std::string> preserve;
+        for (const auto& [key, fn] : fns_) {
+            for (const auto& node : special) {
+                if (key == node || reachable[key].count(node) || reachable[node].count(key)) {
+                    preserve.insert(key);
+                    break;
+                }
+            }
+        }
+        std::vector<std::string> order;
+        for (const auto& [key, fn] : fns_) {
+            bool connected = !edges[key].empty();
+            if (!connected) {
+                for (const auto& [caller, callees] : edges) {
+                    if (callees.count(key)) { connected = true; break; }
+                }
+            }
+            if (connected && !preserve.count(key)) order.push_back(key);
+        }
+        std::stable_sort(order.begin(), order.end(), [&](const std::string& a, const std::string& b) {
+            return reachable[a].size() < reachable[b].size();
+        });
+        const int safe_int_pool[] = {x64::RSI, x64::RDI, x64::R8, x64::R9, x64::R10, x64::R11};
+        for (const auto& key : order) {
+            FnInfo& fn = fns_.at(key);
+            c_ = Ctx();
+            c_.fn = &fn;
+            Weights weights;
+            int loop_count = 0;
+            weigh_stmts(fn.decl->body, 1, weights, loop_count);
+            std::vector<std::string> names;
+            for (const auto& [name, type] : fn.local_types) {
+                if (is_array_type(type)) {
+                    names.push_back(name);
+                    names.push_back("len_" + name);
+                } else {
+                    names.push_back(name);
+                }
+            }
+            for (int id = 0; id < loop_count; id++) {
+                names.push_back("@c" + std::to_string(id));
+                names.push_back("@b" + std::to_string(id));
+            }
+            std::sort(names.begin(), names.end());
+            std::stable_sort(names.begin(), names.end(), [&](const std::string& a, const std::string& b) {
+                const long long wa = weights.count(a) ? weights[a] : 0;
+                const long long wb = weights.count(b) ? weights[b] : 0;
+                return wa > wb;
+            });
+            std::unordered_set<int> blocked_int, blocked_float;
+            for (const auto& child : reachable[key]) {
+                auto planned = register_plan_.find(child);
+                if (planned == register_plan_.end()) continue;
+                for (const auto& [name, encoded] : planned->second) {
+                    (void)name;
+                    if (encoded & 256) blocked_float.insert(encoded & 255);
+                    else blocked_int.insert(encoded);
+                }
+            }
+            std::vector<int> available_int, available_float;
+            for (int reg : safe_int_pool)
+                if (!blocked_int.count(reg)) available_int.push_back(reg);
+            for (int reg = 8; reg < 16; reg++)
+                if (!blocked_float.count(reg)) available_float.push_back(reg);
+            size_t next_int = 0, next_float = 0;
+            auto& plan = register_plan_[key];
+            for (const auto& name : names) {
+                if (!weights.count(name) || weights[name] < 6) continue;
+                const auto type = fn.local_types.find(name);
+                const bool is_float = type != fn.local_types.end() && type->second == NType::Float;
+                if (is_float) {
+                    if (next_float < available_float.size())
+                        plan[name] = enc_reg(true, available_float[next_float++]);
+                } else if (next_int < available_int.size()) {
+                    plan[name] = enc_reg(false, available_int[next_int++]);
+                }
+            }
+            planned_register_functions_.insert(key);
+        }
+    }
+
     bool emit_function(FnInfo& fn, const std::string& key) {
         using namespace x64;
         c_ = Ctx();
         c_.fn = &fn;
+        c_.needs_fallback = fallback_needed_[key];
+        if (c_.needs_fallback) {
+            c_.context_slot = new_slot();
+            c_.fallback_slot = new_slot();
+        }
         cur_stat_ = &loop_stats_[key];
         loop_has_vec_.clear();
 
@@ -1510,7 +1883,7 @@ private:
         std::vector<std::string> names;
         for (const auto& kv : fn.local_types) {
             const bool is_param = std::find(fn.param_names.begin(), fn.param_names.end(), kv.first) != fn.param_names.end();
-            if (kv.second == NType::Array) {
+            if (is_array_type(kv.second)) {
                 if (!is_param) return fail("array local");
                 names.push_back(kv.first);
                 names.push_back("len_" + kv.first);
@@ -1532,11 +1905,11 @@ private:
         }
         for (const auto& [name, type] : fn.local_types) {
             if (std::find(fn.param_names.begin(), fn.param_names.end(), name) == fn.param_names.end() &&
-                type != NType::Array && has_dynamic_tag(fn, name)) c_.tag_slots[name] = new_slot();
+                !is_array_type(type) && has_dynamic_tag(fn, name)) c_.tag_slots[name] = new_slot();
         }
         all_stmt_exprs(fn.decl->body, [&](const ExprPtr& e) {
-            if (e && e->kind == ExprKind::Call && e->callee && e->callee->kind == ExprKind::Ident &&
-                !math_whitelist().count(e->callee->name)) {
+            if (e && e->kind == ExprKind::Call && e->kids().callee && e->kids().callee->kind == ExprKind::Ident &&
+                !builtin_call_name(e->kids().callee->name)) {
                 std::string callee;
                 if (callee_key(fns_, fn, e, callee) && returns_maybe_int(fns_.at(callee)))
                     c_.call_tag_slots[e.get()] = new_slot();
@@ -1544,22 +1917,37 @@ private:
             return true;
         });
         {
-            std::vector<std::string> ranked = names;
-            std::stable_sort(ranked.begin(), ranked.end(), [&](const std::string& a, const std::string& b) {
-                const long long wa = w.count(a) ? w[a] : 0, wb = w.count(b) ? w[b] : 0;
-                return wa > wb;
-            });
-            int next_int = 0, next_float = 8;
-            for (const auto& n : ranked) {
-                const long long weight = w.count(n) ? w[n] : 0;
-                if (weight < 6) continue;
-                Var& v = c_.vars[n];
-                if (v.is_float) { if (next_float < 16) v.reg = next_float++; }
-                else if (next_int < 8) v.reg = kIntPool[next_int++];
+            c_.preserve_regs = !planned_register_functions_.count(key);
+            if (c_.preserve_regs) {
+                std::vector<std::string> ranked = names;
+                std::stable_sort(ranked.begin(), ranked.end(), [&](const std::string& a, const std::string& b) {
+                    const long long wa = w.count(a) ? w[a] : 0, wb = w.count(b) ? w[b] : 0;
+                    return wa > wb;
+                });
+                int next_int = 0, next_float = 8;
+                std::vector<int> int_pool;
+                for (int reg : kIntPool) int_pool.push_back(reg);
+                for (const auto& n : ranked) {
+                    const long long weight = w.count(n) ? w[n] : 0;
+                    if (weight < 6) continue;
+                    Var& v = c_.vars[n];
+                    if (v.is_float) { if (next_float < 16) v.reg = next_float++; }
+                    else if (next_int < static_cast<int>(int_pool.size())) v.reg = int_pool[next_int++];
+                }
+            } else {
+                for (const auto& [name, encoded] : register_plan_.at(key)) {
+                    Var& v = c_.vars.at(name);
+                    v.is_float = (encoded & 256) != 0;
+                    v.reg = encoded & 255;
+                }
             }
             for (const auto& n : names) {
                 const Var& v = c_.vars[n];
-                if (v.reg >= 0) { const int e = enc_reg(v.is_float, v.reg); c_.used_regs.push_back(e); c_.save_slot[e] = new_slot(); }
+                if (v.reg >= 0) {
+                    const int e = enc_reg(v.is_float, v.reg);
+                    c_.used_regs.push_back(e);
+                    if (c_.preserve_regs) c_.save_slot[e] = new_slot();
+                }
             }
         }
 
@@ -1570,32 +1958,38 @@ private:
         const size_t frame_patch = a_.pos();
         a_.d32(0);
         c_.ret_zero = a_.new_label();
-        c_.err_div = a_.new_label();
-        c_.err_ovf = a_.new_label();
-        c_.err_idx = a_.new_label();
         c_.epilogue = a_.new_label();
 
-        for (int e : c_.used_regs) {
-            if (e & 256) a_.movsd_store(RBP, c_.save_slot[e], e & 255);
-            else a_.mov_mr(RBP, c_.save_slot[e], e & 255);
-        }
+        if (c_.preserve_regs)
+            for (int e : c_.used_regs) {
+                if (e & 256) a_.movsd_store(RBP, c_.save_slot[e], e & 255);
+                else a_.mov_mr(RBP, c_.save_slot[e], e & 255);
+            }
 
         const int depth_ok = a_.new_label();
         a_.alu_ri(7, R13, (int32_t)kMaxNativeDepth);
-        a_.jcc(CC_LE, depth_ok);
+        a_.jcc(CC_L, depth_ok);
         a_.mov_m32_imm(R12, 0, 2);
         a_.jmp(c_.ret_zero);
         a_.bind(depth_ok);
 
         int param_slots = 0;
         for (size_t i = 0; i < fn.param_names.size(); i++)
-            param_slots += fn.sig[i] == 'A' || fn.sig[i] == 'M' ? 2 : 1;
+            param_slots += fn.sig[i] == 'A' || fn.sig[i] == 'J' || fn.sig[i] == 'M' ? 2 : 1;
+        if (c_.needs_fallback) {
+            param_slots += 2;
+            a_.mov_rm(RAX, RBP, 24);
+            a_.mov_mr(RBP, c_.context_slot, RAX);
+            a_.mov_rm(RAX, RBP, 16);
+            a_.mov_mr(RBP, c_.fallback_slot, RAX);
+        }
         int pos = 0;
         for (size_t i = 0; i < fn.param_names.size(); i++) {
             const std::string& p = fn.param_names[i];
             const NType lt = fn.local_types.at(p);
-            if (fn.sig[i] == 'A') {
-                if (lt != NType::Array) return fail("array parameter with a scalar local");
+            if (fn.sig[i] == 'A' || fn.sig[i] == 'J') {
+                if ((fn.sig[i] == 'A' && lt != NType::Array) ||
+                    (fn.sig[i] == 'J' && lt != NType::I64Array)) return fail("array parameter type mismatch");
                 const int data_src = 16 + 8 * (param_slots - 1 - pos), len_src = 16 + 8 * (param_slots - 2 - pos);
                 for (const auto& part : {std::make_pair(p, data_src), std::make_pair("len_" + p, len_src)}) {
                     Var& v = var(part.first);
@@ -1606,7 +2000,11 @@ private:
             } else {
                 const int src = 16 + 8 * (param_slots - 1 - pos);
                 Var& pv = var(p);
-                if (fn.sig[i] == 'I') {
+                if (fn.sig[i] == 'O') {
+                    if (lt != NType::Opaque) return fail("opaque parameter type mismatch");
+                    a_.mov_rm(RAX, RBP, src);
+                    put_int(p, RAX);
+                } else if (fn.sig[i] == 'I') {
                     if (lt == NType::Float) { a_.mov_rm(RAX, RBP, src); a_.cvtsi2sd(0, RAX); put_float(p, 0); }
                     else if (lt == NType::Int) {
                         if (pv.reg >= 0) a_.mov_rm(pv.reg, RBP, src); else pv.slot = src;
@@ -1645,18 +2043,19 @@ private:
         }
         if (!gen_stmts(fn.decl->body)) return false;
         a_.jmp(c_.ret_zero);
-
-        a_.bind(c_.err_div); emit_set_err(1);
-        a_.bind(c_.err_idx); emit_set_err(3);
-        a_.bind(c_.err_ovf); emit_set_err(4);
+        for (const auto& stub : c_.stubs) {
+            a_.bind(stub.label);
+            emit_set_err(stub.code | (stub.site << 8));
+        }
         a_.bind(c_.ret_zero);
         a_.mov_ri(RAX, 0);
         a_.xorpd(0, 0);
         a_.bind(c_.epilogue);
-        for (int e : c_.used_regs) {
-            if (e & 256) a_.movsd_load(e & 255, RBP, c_.save_slot[e]);
-            else a_.mov_rm(e & 255, RBP, c_.save_slot[e]);
-        }
+        if (c_.preserve_regs)
+            for (int e : c_.used_regs) {
+                if (e & 256) a_.movsd_load(e & 255, RBP, c_.save_slot[e]);
+                else a_.mov_rm(e & 255, RBP, c_.save_slot[e]);
+            }
         a_.leave();
         a_.ret();
 
@@ -1699,7 +2098,9 @@ private:
         }
         int nslots = 0;
         for (size_t i = 0; i < fn.param_names.size(); i++)
-            nslots += fn.sig[i] == 'A' || fn.sig[i] == 'M' ? 2 : 1;
+            nslots += fn.sig[i] == 'A' || fn.sig[i] == 'J' || fn.sig[i] == 'M' ? 2 : 1;
+        const bool needs_fallback = fallback_needed_[key];
+        if (needs_fallback) nslots += 2;
         const int pad = (nslots * 8) % 16 ? 8 : 0;
         if (pad) a_.alu_ri(5, RSP, pad);
         for (size_t i = 0; i < fn.param_names.size(); i++) {
@@ -1709,12 +2110,34 @@ private:
                     a_.push_m(RDI, base + (int)offsetof(NativeArg, data));
                     a_.push_m(RDI, base + (int)offsetof(NativeArg, length));
                     break;
+                case 'J':
+                    a_.push_m(RDI, base + (int)offsetof(NativeArg, idata));
+                    a_.push_m(RDI, base + (int)offsetof(NativeArg, length));
+                    break;
+                case 'O':
+                    a_.push_m(RDI, base + (int)offsetof(NativeArg, opaque));
+                    break;
                 case 'I': a_.push_m(RDI, base + (int)offsetof(NativeArg, ival)); break;
                 default: a_.push_m(RDI, base + (int)offsetof(NativeArg, number)); break;
             }
         }
+        if (needs_fallback && fn.param_names.empty()) {
+            a_.mov_ri(RAX, 0);
+            a_.push_r(RAX);
+            a_.push_r(RAX);
+        } else if (needs_fallback) {
+            a_.push_m(RDI, (int)offsetof(NativeArg, context));
+            a_.push_m(RDI, (int)offsetof(NativeArg, fallback));
+        }
         a_.call(fn_label_.at(key));
         a_.alu_ri(0, RSP, nslots * 8 + pad);
+        if (fn.return_type == NType::Float && !returns_maybe_int(fn)) {
+            const int tag_skip = a_.new_label();
+            a_.cmp_m32_imm8(R12, 0, 0);
+            a_.jcc(CC_NE, tag_skip);
+            a_.mov_m32_imm(R14, 0, 1);
+            a_.bind(tag_skip);
+        }
         a_.pop_r(RCX);
         if (fn.return_type == NType::Float) a_.movsd_store(RCX, 0, 0); else a_.mov_mr(RCX, 0, RAX);
         if (returns_maybe_int(fn)) a_.mov_m32r(R14, 0, RDX);
@@ -1736,11 +2159,11 @@ private:
 static void x64_put32(std::string& s, uint32_t v) { for (int i = 0; i < 4; i++) s.push_back((char)((v >> (8 * i)) & 0xFF)); }
 
 std::string x64_serialize(const x64::Image& img) {
-    std::string s = "CSYX64\x02";
+    std::string s = "CSYX64\x03";
     x64_put32(s, (uint32_t)img.entries.size());
     for (const auto& e : img.entries) {
         x64_put32(s, e.offset);
-        s.push_back(e.ret_float ? 1 : 0);
+        s.push_back(e.ret_float ? 1 : (e.ret_bool ? 2 : 0));
         x64_put32(s, (uint32_t)e.name.size()); s += e.name;
         x64_put32(s, (uint32_t)e.sig.size()); s += e.sig;
         x64_put32(s, e.user_nparams);
@@ -1748,6 +2171,13 @@ std::string x64_serialize(const x64::Image& img) {
         for (const auto& name : e.global_names) {
             x64_put32(s, (uint32_t)name.size()); s += name;
         }
+    }
+    x64_put32(s, (uint32_t)img.sites.size());
+    for (const auto& site : img.sites) {
+        x64_put32(s, (uint32_t)site.func.size()); s += site.func;
+        x64_put32(s, (uint32_t)site.file.size()); s += site.file;
+        x64_put32(s, (uint32_t)site.line);
+        x64_put32(s, (uint32_t)site.col);
     }
     x64_put32(s, (uint32_t)img.blob.size());
     s += img.blob;
@@ -1764,7 +2194,7 @@ bool x64_parse(const std::string& s, x64::Image& img) {
         return true;
     };
     if (s.size() < 7 || s.compare(0, 6, "CSYX64") != 0 ||
-        (s[6] != 1 && s[6] != 2)) return false;
+        (s[6] != 1 && s[6] != 2 && s[6] != 3)) return false;
     const uint8_t version = static_cast<uint8_t>(s[6]);
     p = 7;
     uint32_t n = 0;
@@ -1773,7 +2203,11 @@ bool x64_parse(const std::string& s, x64::Image& img) {
         x64::Entry e;
         uint32_t len = 0;
         if (!get32(e.offset) || s.size() - p < 1) return false;
-        e.ret_float = s[p++] != 0;
+        {
+            const uint8_t kind = static_cast<uint8_t>(s[p++]);
+            e.ret_float = kind == 1;
+            e.ret_bool = kind == 2;
+        }
         if (!get32(len) || len > 4096 || s.size() - p < len) return false;
         e.name.assign(s, p, len); p += len;
         if (!get32(len) || len > 64 || s.size() - p < len) return false;
@@ -1793,6 +2227,22 @@ bool x64_parse(const std::string& s, x64::Image& img) {
         }
         img.entries.push_back(std::move(e));
     }
+    if (version >= 3) {
+        uint32_t site_count = 0;
+        if (!get32(site_count) || site_count > (1u << 22)) return false;
+        for (uint32_t i = 0; i < site_count; i++) {
+            x64::Site site;
+            uint32_t len = 0, line = 0, col = 0;
+            if (!get32(len) || len > 4096 || s.size() - p < len) return false;
+            site.func.assign(s, p, len); p += len;
+            if (!get32(len) || len > 65536 || s.size() - p < len) return false;
+            site.file.assign(s, p, len); p += len;
+            if (!get32(line) || !get32(col)) return false;
+            site.line = static_cast<int>(line);
+            site.col = static_cast<int>(col);
+            img.sites.push_back(std::move(site));
+        }
+    }
     uint32_t blob = 0;
     if (!get32(blob) || s.size() - p != blob) return false;
     img.blob.assign(s, p, blob);
@@ -1808,7 +2258,9 @@ bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why
         auto it = ir_index.find(e.name);
         if (it == ir_index.end()) return true;
         const auto code = x64_sig_code(e.sig);
-        for (const auto& v : ir.functions[it->second].native_variants) if (v.sig == code) return true;
+        const auto mask = x64_opaque_mask(e.sig);
+        for (const auto& v : ir.functions[it->second].native_variants)
+            if (v.sig == code && v.opaque_mask == mask) return true;
         return false;
     };
     if (only_missing) {
@@ -1827,6 +2279,15 @@ bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why
         why = "cannot make machine code executable";
         return false;
     }
+    const uint32_t site_base = static_cast<uint32_t>(ir.native_sites.size());
+    for (const auto& site : img.sites) {
+        NativeSite rec;
+        rec.func = site.func;
+        rec.file = site.file;
+        rec.line = site.line;
+        rec.col = site.col;
+        ir.native_sites.push_back(std::move(rec));
+    }
     loaded = 0;
     for (const auto& e : img.entries) {
         auto it = ir_index.find(e.name);
@@ -1835,7 +2296,9 @@ bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why
         if (e.user_nparams + e.global_names.size() != e.sig.size()) continue;
         NativeVariant v;
         v.entry = reinterpret_cast<NativeEntry>(static_cast<char*>(mem) + e.offset);
+        v.site_base = site_base;
         v.sig = x64_sig_code(e.sig);
+        v.opaque_mask = x64_opaque_mask(e.sig);
         v.nparams = e.user_nparams;
         bool globals_found = true;
         for (const auto& name : e.global_names) {
@@ -1845,6 +2308,7 @@ bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why
         }
         if (!globals_found) continue;
         v.ret_float = e.ret_float;
+        v.ret_bool = e.ret_bool;
         ir.functions[it->second].native_variants.push_back(v);
         loaded++;
     }
@@ -1852,4 +2316,3 @@ bool x64_load(const x64::Image& img, IRModule& ir, int& loaded, std::string& why
 }
 
 #endif
-

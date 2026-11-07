@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -467,9 +468,12 @@ unsigned resolve_threads(unsigned requested, uint64_t bytes_per_worker) {
 }
 
 namespace {
-struct StackThreadStart { std::function<void()> fn; };
+thread_local size_t g_thread_stack_bytes = 0;
+struct StackThreadStart { std::function<void()> fn; size_t bytes = 0; };
 void* stack_thread_trampoline(void* arg) {
-    static_cast<StackThreadStart*>(arg)->fn();
+    StackThreadStart* start = static_cast<StackThreadStart*>(arg);
+    g_thread_stack_bytes = start->bytes;
+    start->fn();
     return nullptr;
 }
 bool spawn_stack_thread(pthread_t& handle, size_t bytes, StackThreadStart* start) {
@@ -485,7 +489,7 @@ constexpr size_t kWorkerStackBytes = 64u * 1024u * 1024u;
 
 void run_with_stack(size_t bytes, const std::function<void()>& fn) {
     for (size_t size = bytes; size >= 8u * 1024u * 1024u; size /= 4) {
-        StackThreadStart start{fn};
+        StackThreadStart start{fn, size};
         pthread_t handle;
         if (spawn_stack_thread(handle, size, &start)) {
             pthread_join(handle, nullptr);
@@ -493,6 +497,14 @@ void run_with_stack(size_t bytes, const std::function<void()>& fn) {
         }
     }
     fn();
+}
+
+size_t current_stack_bytes() {
+    if (g_thread_stack_bytes != 0) return g_thread_stack_bytes;
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_STACK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur >= (1u << 20))
+        return static_cast<size_t>(limit.rlim_cur);
+    return 8u * 1024u * 1024u;
 }
 
 void parallel_for(size_t count, unsigned threads, const std::function<void(size_t)>& fn) {
@@ -526,7 +538,7 @@ void parallel_for(size_t count, unsigned threads, const std::function<void(size_
     pool.reserve(threads - 1);
     starts.reserve(threads - 1);
     for (unsigned t = 1; t < threads; ++t) {
-        starts.push_back(StackThreadStart{worker});
+        starts.push_back(StackThreadStart{worker, kWorkerStackBytes});
         pthread_t handle;
         if (!spawn_stack_thread(handle, kWorkerStackBytes, &starts.back())) {
             starts.pop_back();

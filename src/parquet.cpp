@@ -385,21 +385,28 @@ struct Leaf {
     int converted = -1;
     int max_def = 0;
     int max_rep = 0;
+    int rep_def = 0;
     bool flat() const { return path.size() == 1 && max_rep == 0 && max_def <= 1; }
+    bool readable() const { return max_rep <= 1; }
+    bool is_list() const { return max_rep == 1; }
 };
 
 void walk_schema(const FileMeta& fm, size_t& idx, int children, std::vector<std::string>& path,
-                 int def, int rep, int depth, std::vector<Leaf>& out) {
+                 int def, int rep, int rep_def, int depth, std::vector<Leaf>& out) {
     if (depth > 64) fail("the schema is nested too deeply");
     for (int c = 0; c < children; c++) {
         if (idx >= fm.schema.size()) fail("the schema ends before all of its columns");
         const SchemaEl& e = fm.schema[idx++];
-        int d = def, r = rep;
+        int d = def, r = rep, rd = rep_def;
         if (e.rep == R_OPTIONAL) d++;
-        else if (e.rep == R_REPEATED) { d++; r++; }
+        else if (e.rep == R_REPEATED) {
+            d++;
+            r++;
+            if (rep == 0) rd = d;
+        }
         path.push_back(e.name);
         if (e.children > 0) {
-            walk_schema(fm, idx, e.children, path, d, r, depth + 1, out);
+            walk_schema(fm, idx, e.children, path, d, r, rd, depth + 1, out);
         } else if (e.type >= 0) {
             Leaf leaf;
             leaf.path = path;
@@ -411,6 +418,7 @@ void walk_schema(const FileMeta& fm, size_t& idx, int children, std::vector<std:
             leaf.converted = e.converted;
             leaf.max_def = d;
             leaf.max_rep = r;
+            leaf.rep_def = rd;
             out.push_back(std::move(leaf));
         }
         path.pop_back();
@@ -634,6 +642,9 @@ struct ColumnOut {
     bool use_f64 = false;
     std::vector<double> f;
     std::vector<Value> v;
+    bool row_open = false;
+    bool row_null = false;
+    std::vector<Value> row_items;
     size_t size() const { return use_f64 ? f.size() : v.size(); }
 };
 
@@ -649,23 +660,19 @@ void append_values(ColumnOut& col, Decoded& d, const std::vector<uint32_t>& defs
         case P_FLOAT:
         case P_DOUBLE:
             if (d.d.size() != non_null) fail("a page has fewer values than its header declares");
-            col.f.reserve(col.f.size() + n);
             for (size_t k = 0; k < n; k++) col.f.push_back(is_null(k) ? std::nan("") : d.d[vi++]);
             return;
         case P_BOOLEAN:
             if (d.i.size() != non_null) fail("a page has fewer values than its header declares");
-            col.v.reserve(col.v.size() + n);
             for (size_t k = 0; k < n; k++) col.v.push_back(is_null(k) ? Value() : Value::make_bool(d.i[vi++] != 0));
             return;
         case P_INT32:
         case P_INT64:
             if (d.i.size() != non_null) fail("a page has fewer values than its header declares");
-            col.v.reserve(col.v.size() + n);
             for (size_t k = 0; k < n; k++) col.v.push_back(is_null(k) ? Value() : Value::make_int(d.i[vi++]));
             return;
         case P_BYTE_ARRAY:
             if (d.s.size() != non_null) fail("a page has fewer values than its header declares");
-            col.v.reserve(col.v.size() + n);
             for (size_t k = 0; k < n; k++) {
                 if (is_null(k)) {
                     col.v.push_back(Value());
@@ -679,6 +686,70 @@ void append_values(ColumnOut& col, Decoded& d, const std::vector<uint32_t>& defs
             return;
         default:
             fail("columns of type " + ptype_name(col.ptype) + " are not supported");
+    }
+}
+
+void flush_list_row(ColumnOut& col) {
+    if (!col.row_open) return;
+    if (col.row_null) col.v.push_back(Value());
+    else col.v.push_back(Value::make_vec(std::move(col.row_items)));
+    col.row_items.clear();
+    col.row_open = false;
+    col.row_null = false;
+}
+
+void append_list_values(ColumnOut& col, Decoded& d, const std::vector<uint32_t>& defs, const std::vector<uint32_t>& reps,
+                        size_t n, const Leaf& leaf, size_t non_null, Context& ctx) {
+    switch (leaf.ptype) {
+        case P_FLOAT:
+        case P_DOUBLE:
+            if (d.d.size() != non_null) fail("a page has fewer values than its header declares");
+            break;
+        case P_BYTE_ARRAY:
+            if (d.s.size() != non_null) fail("a page has fewer values than its header declares");
+            break;
+        case P_BOOLEAN:
+        case P_INT32:
+        case P_INT64:
+            if (d.i.size() != non_null) fail("a page has fewer values than its header declares");
+            break;
+        default:
+            fail("columns of type " + ptype_name(leaf.ptype) + " are not supported");
+    }
+    if (defs.size() != n || reps.size() != n) fail("a page has fewer levels than its header declares");
+    const uint32_t max_def = static_cast<uint32_t>(leaf.max_def);
+    const uint32_t before_items = static_cast<uint32_t>(leaf.rep_def - 1);
+    size_t vi = 0;
+    for (size_t k = 0; k < n; k++) {
+        if (reps[k] == 0) {
+            flush_list_row(col);
+            col.row_open = true;
+        } else if (!col.row_open) {
+            fail("column '" + leaf.name + "' continues a list that was never started, the file is corrupt");
+        }
+        const uint32_t def = defs[k];
+        if (def < before_items) {
+            col.row_null = true;
+            continue;
+        }
+        if (def == before_items) continue;
+        if (def < max_def) {
+            col.row_items.push_back(Value());
+            continue;
+        }
+        switch (leaf.ptype) {
+            case P_FLOAT:
+            case P_DOUBLE: col.row_items.push_back(Value::make_float(d.d[vi++])); break;
+            case P_BOOLEAN: col.row_items.push_back(Value::make_bool(d.i[vi++] != 0)); break;
+            case P_INT32:
+            case P_INT64: col.row_items.push_back(Value::make_int(d.i[vi++])); break;
+            default: {
+                std::string& text = d.s[vi++];
+                if (text.size() > ctx.string_budget) fail("the decoded string data is larger than the 1 GiB safety limit");
+                ctx.string_budget -= text.size();
+                col.row_items.push_back(Value::make_str(std::move(text)));
+            }
+        }
     }
 }
 
@@ -723,8 +794,10 @@ void read_chunk(std::ifstream& in, uint64_t fsize, const ColMeta& m, const Leaf&
         fail("column '" + leaf.name + "' uses " + codec_name(m.codec) +
              " compression, which is not supported (supported: UNCOMPRESSED, SNAPPY, GZIP, ZSTD)");
     }
-    if (m.num_values != expect_rows) fail("column '" + leaf.name + "' has " + std::to_string(m.num_values) +
-                                          " values but its row group has " + std::to_string(expect_rows) + " rows");
+    if (leaf.is_list() ? m.num_values < expect_rows : m.num_values != expect_rows) {
+        fail("column '" + leaf.name + "' has " + std::to_string(m.num_values) +
+             " values but its row group has " + std::to_string(expect_rows) + " rows");
+    }
     int64_t start = m.data_off;
     if (m.dict_off > 0 && m.dict_off < m.data_off) start = m.dict_off;
     if (start < 4 || m.total_compressed < 0 || static_cast<uint64_t>(start) > fsize ||
@@ -743,7 +816,7 @@ void read_chunk(std::ifstream& in, uint64_t fsize, const ColMeta& m, const Leaf&
     Decoded dict;
     bool have_dict = false;
     std::vector<uint8_t> scratch;
-    std::vector<uint32_t> defs, indices;
+    std::vector<uint32_t> defs, reps, indices;
     int64_t seen = 0;
     while (seen < m.num_values) {
         if (chunk.left() == 0) fail("column '" + leaf.name + "' ends before all of its values were read");
@@ -773,9 +846,16 @@ void read_chunk(std::ifstream& in, uint64_t fsize, const ColMeta& m, const Leaf&
 
         Span values{nullptr, 0};
         defs.clear();
+        reps.clear();
         if (h.type == PG_DATA) {
             const Span s = inflate_block(m.codec, body, comp, uncomp, scratch);
             Buf b(s.p, s.n);
+            if (leaf.max_rep > 0) {
+                const uint32_t rlen = b.u32();
+                const uint8_t* rep_bytes = b.take(rlen);
+                Buf rv(rep_bytes, rlen);
+                decode_hybrid(rv, bit_width_of(leaf.max_rep), n, reps);
+            }
             if (leaf.max_def > 0) {
                 const uint32_t len = b.u32();
                 const uint8_t* level_bytes = b.take(len);
@@ -784,22 +864,34 @@ void read_chunk(std::ifstream& in, uint64_t fsize, const ColMeta& m, const Leaf&
             }
             values = {b.p + b.pos, b.left()};
         } else {
-            if (h.rep_len != 0) fail("column '" + leaf.name + "' has repetition levels, nested columns are not supported");
-            if (h.def_len < 0 || static_cast<uint64_t>(h.def_len) > comp || static_cast<uint64_t>(h.def_len) > uncomp) {
+            if (h.rep_len < 0 || (leaf.max_rep == 0 && h.rep_len != 0)) {
                 fail("a data page has invalid level sizes");
             }
+            if (h.def_len < 0 || static_cast<uint64_t>(h.def_len) > comp || static_cast<uint64_t>(h.def_len) > uncomp ||
+                static_cast<uint64_t>(h.rep_len) > comp || static_cast<uint64_t>(h.rep_len) + static_cast<uint64_t>(h.def_len) > comp ||
+                static_cast<uint64_t>(h.rep_len) + static_cast<uint64_t>(h.def_len) > uncomp) {
+                fail("a data page has invalid level sizes");
+            }
+            const size_t rl = static_cast<size_t>(h.rep_len);
             const size_t dl = static_cast<size_t>(h.def_len);
+            if (leaf.max_rep > 0) {
+                Buf rv(body, rl);
+                decode_hybrid(rv, bit_width_of(leaf.max_rep), n, reps);
+            }
             if (leaf.max_def > 0) {
-                Buf lv(body, dl);
+                Buf lv(body + rl, dl);
                 decode_hybrid(lv, bit_width_of(leaf.max_def), n, defs);
             } else if (dl != 0) {
                 fail("a data page has definition levels for a required column");
             }
             const bool compressed = h.is_compressed && m.codec != C_UNCOMPRESSED;
-            values = inflate_block(compressed ? m.codec : C_UNCOMPRESSED, body + dl, comp - dl, uncomp - dl, scratch);
+            values = inflate_block(compressed ? m.codec : C_UNCOMPRESSED, body + rl + dl, comp - rl - dl, uncomp - rl - dl, scratch);
         }
         for (const uint32_t level : defs) {
             if (level > static_cast<uint32_t>(leaf.max_def)) fail("a definition level is out of range, the file is corrupt");
+        }
+        for (const uint32_t level : reps) {
+            if (level > static_cast<uint32_t>(leaf.max_rep)) fail("a repetition level is out of range, the file is corrupt");
         }
         size_t non_null = n;
         if (leaf.max_def > 0) {
@@ -826,9 +918,11 @@ void read_chunk(std::ifstream& in, uint64_t fsize, const ColMeta& m, const Leaf&
         } else {
             fail("column '" + leaf.name + "' uses the " + encoding_name(h.encoding) + " encoding, which is not supported yet");
         }
-        append_values(out, d, defs, n, leaf.max_def, non_null, ctx);
+        if (leaf.is_list()) append_list_values(out, d, defs, reps, n, leaf, non_null, ctx);
+        else append_values(out, d, defs, n, leaf.max_def, non_null, ctx);
         seen += h.num_values;
     }
+    if (leaf.is_list()) flush_list_row(out);
     if (static_cast<int64_t>(out.size()) < expect_rows) fail("column '" + leaf.name + "' has fewer values than its row group");
 }
 
@@ -872,7 +966,7 @@ struct Reader::Impl {
         std::vector<ColumnOut> outs(selected.size());
         for (size_t j = 0; j < selected.size(); j++) {
             outs[j].ptype = leaves[selected[j]].ptype;
-            outs[j].use_f64 = outs[j].ptype == P_FLOAT || outs[j].ptype == P_DOUBLE;
+            outs[j].use_f64 = (outs[j].ptype == P_FLOAT || outs[j].ptype == P_DOUBLE) && !leaves[selected[j]].is_list();
             if (outs[j].ptype == P_INT96 || outs[j].ptype == P_FIXED) {
                 fail("column '" + leaves[selected[j]].name + "' has type " + ptype_name(outs[j].ptype) + ", which is not supported");
             }
@@ -888,7 +982,7 @@ struct Reader::Impl {
     }
 
     Value table_from(std::vector<ColumnOut>& outs, long long rows) const {
-        std::unordered_map<std::string, Value> columns;
+        DictMap columns;
         std::vector<Value> name_values;
         for (size_t j = 0; j < selected.size(); j++) {
             const std::string& name = names[j];
@@ -901,7 +995,7 @@ struct Reader::Impl {
                 columns[name] = Value::make_vec(std::move(outs[j].v));
             }
         }
-        std::unordered_map<std::string, Value> table;
+        DictMap table;
         table["names"] = Value::make_vec(std::move(name_values));
         table["rows"] = Value::make_int(rows);
         table["columns"] = Value::make_dict(std::move(columns));
@@ -947,7 +1041,7 @@ Reader::Reader(const std::string& path, const ReadOptions& options) : impl_(new 
     {
         size_t idx = 1;
         std::vector<std::string> path_stack;
-        walk_schema(d.fm, idx, d.fm.schema[0].children, path_stack, 0, 0, 0, d.leaves);
+        walk_schema(d.fm, idx, d.fm.schema[0].children, path_stack, 0, 0, 0, 0, d.leaves);
     }
     if (d.leaves.size() > kMaxColumns) fail("the file has more than 65536 columns");
 
@@ -960,14 +1054,14 @@ Reader::Reader(const std::string& path, const ReadOptions& options) : impl_(new 
                 if (d.leaves[k].name == want) { found = k; break; }
             }
             if (found == d.leaves.size()) fail("the file has no column '" + want + "' (columns: " + join_names(d.leaves) + ")");
-            if (!d.leaves[found].flat()) fail("column '" + want + "' is nested or repeated, which is not supported");
+            if (!d.leaves[found].readable()) fail("column '" + want + "' is a list inside a list, which is not supported");
             d.selected.push_back(found);
         }
     } else {
         for (size_t k = 0; k < d.leaves.size(); k++) {
-            if (!d.leaves[k].flat()) {
-                fail("column '" + d.leaves[k].name + "' is nested or repeated, which is not supported; "
-                     "pass a list with the flat columns you want");
+            if (!d.leaves[k].readable()) {
+                fail("column '" + d.leaves[k].name + "' is a list inside a list, which is not supported; "
+                     "pass a list with the columns you want");
             }
             d.selected.push_back(k);
         }
@@ -1262,7 +1356,7 @@ struct ChunkInfo {
 
 namespace {
 
-void extract_table(const Value& table, std::vector<std::string>& names, const std::unordered_map<std::string, Value>*& cols) {
+void extract_table(const Value& table, std::vector<std::string>& names, const DictMap*& cols) {
     if (table.type != Value::Dict) {
         fail("a table must be a dict of columns, or the dict returned by load_parquet");
     }
@@ -1285,7 +1379,7 @@ void extract_table(const Value& table, std::vector<std::string>& names, const st
     std::sort(names.begin(), names.end());
 }
 
-void validate_names(const std::vector<std::string>& names, const std::unordered_map<std::string, Value>& cols) {
+void validate_names(const std::vector<std::string>& names, const DictMap& cols) {
     if (names.empty()) fail("the table has no columns");
     if (names.size() > kMaxColumns) fail("the table has more than 65536 columns");
     std::unordered_set<std::string> seen;
@@ -1426,7 +1520,7 @@ struct Writer::Impl {
     void append_oneshot(const Value& table) {
         if (started) fail("save_parquet writes one table, use create_dataset to write in batches");
         std::vector<std::string> names;
-        const std::unordered_map<std::string, Value>* cols = nullptr;
+        const DictMap* cols = nullptr;
         extract_table(table, names, cols);
         validate_names(names, *cols);
         for (const std::string& name : names) specs.push_back(classify(name, cols->find(name)->second));
@@ -1452,11 +1546,9 @@ struct Writer::Impl {
         };
         if (col.type == Value::F64Array) {
             if (s.ptype != P_DOUBLE) fail("column '" + s.name + "' is an f64_array in this batch, but the first batch fixed its type as " + ptype_name(s.ptype));
-            dst.reserve(dst.size() + col.f64_array_val->size());
             for (const double x : *col.f64_array_val) dst.push_back(Value::make_float(x));
             return;
         }
-        dst.reserve(dst.size() + col.vec_val->size());
         for (const Value& e : *col.vec_val) {
             switch (e.type) {
                 case Value::None: break;
@@ -1500,7 +1592,7 @@ struct Writer::Impl {
 
     void append_stream(const Value& table) {
         std::vector<std::string> names;
-        const std::unordered_map<std::string, Value>* cols = nullptr;
+        const DictMap* cols = nullptr;
         extract_table(table, names, cols);
         validate_names(names, *cols);
         std::vector<ColSpec> fresh;

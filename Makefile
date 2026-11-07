@@ -25,12 +25,16 @@ SOURCES := \
 	$(CSY_DIR)/linker.cpp \
 	$(CSY_DIR)/explain.cpp \
 	$(CSY_DIR)/diagnostic.cpp \
+	$(CSY_DIR)/voice.cpp \
 	$(CSY_DIR)/suggest.cpp \
 	$(CSY_DIR)/semantic.cpp \
 	$(CSY_DIR)/codegen.cpp \
 	$(CSY_DIR)/ir.cpp \
 	$(CSY_DIR)/value.cpp \
 	$(CSY_DIR)/builtins_ext.cpp \
+	$(CSY_DIR)/builtins_std.cpp \
+	$(CSY_DIR)/builtins_general.cpp \
+	$(CSY_DIR)/process.cpp \
 	$(CSY_DIR)/compress.cpp \
 	$(CSY_DIR)/zstd.cpp \
 	$(CSY_DIR)/json.cpp \
@@ -41,6 +45,7 @@ SOURCES := \
 	$(CSY_DIR)/pi.cpp \
 	$(CSY_DIR)/gpu_nvidia.cpp \
 	$(CSY_DIR)/native_jit.cpp \
+	$(CSY_DIR)/native_aot.cpp \
 	$(CSY_DIR)/tui.cpp \
 	$(CSY_DIR)/vm.cpp \
 	$(CSY_DIR)/main.cpp
@@ -54,6 +59,8 @@ csyc: $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -I$(CSY_DIR) -c $< -o $@
 
 $(CSY_DIR)/main.o: VERSION
+
+$(CSY_DIR)/vm.o: CXXFLAGS += -O2
 
 -include $(OBJECTS:.o=.d)
 

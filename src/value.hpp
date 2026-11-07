@@ -1,23 +1,28 @@
 #pragma once
 
 #include "rc.hpp"
+#include "ordered_map.hpp"
+#include "utf8.hpp"
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <functional>
 #include <cstdint>
+#include <cmath>
 #include <new>
 
 namespace csy {
 
 struct Function;
 struct VM;
+struct Value;
+using DictMap = OrderedMap<Value>;
 
 using BuiltinFn = std::function<struct Value(VM&, std::vector<struct Value>&)>;
 
 struct Value {
     enum Type {
-        None, Bool, Int, Float, Str, Vec, F64Array, Dict, Func, Sink
+        None, Bool, Int, Float, Str, Vec, F64Array, I64Array, Dict, Func, Sink
     } type = None;
 
     static constexpr long long SINK_OUT = 0;
@@ -26,10 +31,11 @@ struct Value {
         bool bool_val;
         long long int_val;
         double float_val;
-        Rc<std::string> str_val;
+        Rc<StrObj> str_val;
         Rc<std::vector<Value>> vec_val;
         Rc<std::vector<double>> f64_array_val;
-        Rc<std::unordered_map<std::string, Value>> dict_val;
+        Rc<std::vector<long long>> i64_array_val;
+        Rc<DictMap> dict_val;
         Rc<Function> func_val;
         unsigned long long raw_;
     };
@@ -39,10 +45,11 @@ struct Value {
     Value() noexcept : raw_(0) {}
     Value(const Value& other) : type(other.type), raw_(0) {
         switch (type) {
-            case Str:      new (&str_val) Rc<std::string>(other.str_val); break;
+            case Str:      new (&str_val) Rc<StrObj>(other.str_val); break;
             case Vec:      new (&vec_val) Rc<std::vector<Value>>(other.vec_val); break;
             case F64Array: new (&f64_array_val) Rc<std::vector<double>>(other.f64_array_val); break;
-            case Dict:     new (&dict_val) Rc<std::unordered_map<std::string, Value>>(other.dict_val); break;
+            case I64Array: new (&i64_array_val) Rc<std::vector<long long>>(other.i64_array_val); break;
+            case Dict:     new (&dict_val) Rc<DictMap>(other.dict_val); break;
             case Func:     new (&func_val) Rc<Function>(other.func_val); break;
             default:       raw_ = other.raw_; break;
         }
@@ -67,10 +74,11 @@ struct Value {
     }
     ~Value() {
         switch (type) {
-            case Str:      str_val.~Rc<std::string>(); break;
+            case Str:      str_val.~Rc<StrObj>(); break;
             case Vec:      vec_val.~Rc<std::vector<Value>>(); break;
             case F64Array: f64_array_val.~Rc<std::vector<double>>(); break;
-            case Dict:     dict_val.~Rc<std::unordered_map<std::string, Value>>(); break;
+            case I64Array: i64_array_val.~Rc<std::vector<long long>>(); break;
+            case Dict:     dict_val.~Rc<DictMap>(); break;
             case Func:     func_val.~Rc<Function>(); break;
             default: break;
         }
@@ -82,7 +90,7 @@ struct Value {
     static Value make_float(double d) { Value v; v.type = Float; v.float_val = d; return v; }
     static Value make_str(std::string s) {
         Value v;
-        new (&v.str_val) Rc<std::string>(make_rc<std::string>(std::move(s)));
+        new (&v.str_val) Rc<StrObj>(make_rc<StrObj>(std::move(s)));
         v.type = Str;
         return v;
     }
@@ -98,10 +106,16 @@ struct Value {
         v.type = F64Array;
         return v;
     }
-    static Value make_dict(std::unordered_map<std::string, Value> m) {
+    static Value make_i64_array(std::size_t size, long long initial = 0) {
         Value v;
-        new (&v.dict_val) Rc<std::unordered_map<std::string, Value>>(
-            make_rc<std::unordered_map<std::string, Value>>(std::move(m)));
+        new (&v.i64_array_val) Rc<std::vector<long long>>(make_rc<std::vector<long long>>(size, initial));
+        v.type = I64Array;
+        return v;
+    }
+    static Value make_dict(DictMap m) {
+        Value v;
+        new (&v.dict_val) Rc<DictMap>(
+            make_rc<DictMap>(std::move(m)));
         v.type = Dict;
         return v;
     }
@@ -122,6 +136,54 @@ struct Value {
     std::string type_name() const;
 };
 
+inline std::string display_function_name(const std::string& raw) {
+    std::string name;
+    name.reserve(raw.size());
+    for (std::size_t i = 0; i < raw.size();) {
+        if (raw.compare(i, 4, "_x24") == 0) { name.push_back('$'); i += 4; }
+        else name.push_back(raw[i++]);
+    }
+    if (name.compare(0, 7, "__csy_u") == 0) {
+        const std::size_t us = name.find('_', 7);
+        if (us != std::string::npos && us + 1 < name.size()) name = name.substr(us + 1);
+    }
+    if (name.size() > 2 && name[0] == '$') {
+        const std::size_t sep = name.find('$', 1);
+        if (sep != std::string::npos && sep + 1 < name.size() && name.compare(0, 6, "$base$") != 0 &&
+            name.compare(0, 5, "$csy_") != 0)
+            name = name.substr(1, sep - 1) + "::" + name.substr(sep + 1);
+    }
+    return name;
+}
+
+inline int compare_int_double(long long i, double d) {
+    if (d != d) return 2;
+    if (i >= -9007199254740992LL && i <= 9007199254740992LL) {
+        const double x = static_cast<double>(i);
+        return x < d ? -1 : (x > d ? 1 : 0);
+    }
+    if (d >= 9223372036854775808.0) return -1;
+    if (d < -9223372036854775808.0) return 1;
+    const double fl = std::floor(d);
+    const long long fi = static_cast<long long>(fl);
+    if (i < fi) return -1;
+    if (i > fi) return 1;
+    return d > fl ? -1 : 0;
+}
+
+inline int compare_mixed_numbers(const Value& a, const Value& b) {
+    if (a.type == Value::Int && b.type == Value::Float) return compare_int_double(a.int_val, b.float_val);
+    if (a.type == Value::Float && b.type == Value::Int) {
+        const int c = compare_int_double(b.int_val, a.float_val);
+        return c == 2 ? 2 : -c;
+    }
+    const double x = a.type == Value::Float ? a.float_val : static_cast<double>(a.int_val);
+    const double y = b.type == Value::Float ? b.float_val : static_cast<double>(b.int_val);
+    return x < y ? -1 : (x > y ? 1 : (x == y ? 0 : 2));
+}
+
+bool values_equal(const Value& a, const Value& b, int depth = 0);
+
 struct Function {
     std::string name;
     std::vector<std::string> param_names;
@@ -132,4 +194,3 @@ struct Function {
 };
 
 }
-

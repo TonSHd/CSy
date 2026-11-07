@@ -82,6 +82,7 @@ void parallel_for(size_t count, unsigned threads,
                   const std::function<void(size_t)>& fn);
 
 void run_with_stack(size_t bytes, const std::function<void()>& fn);
+size_t current_stack_bytes();
 
 }
 }

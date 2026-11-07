@@ -23,11 +23,11 @@ std::vector<Decl> declarations(const Module& module) {
     for (const auto& s : module.body) {
         if (!s) continue;
         if (s->kind == StmtKind::FuncDecl) {
-            if (!s->func_name.empty() && s->func_name[0] != '$' && seen.insert(s->func_name).second)
-                out.push_back({s->func_name, "func", s->tok.line});
-        } else if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->target &&
-                   s->expr->target->kind == ExprKind::Ident) {
-            const std::string& name = s->expr->target->name;
+            if (!s->aux().func_name.empty() && s->aux().func_name[0] != '$' && seen.insert(s->aux().func_name).second)
+                out.push_back({s->aux().func_name, "func", s->tok.line});
+        } else if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target &&
+                   s->expr->kids().target->kind == ExprKind::Ident) {
+            const std::string& name = s->expr->kids().target->name;
             if (seen.insert(name).second) out.push_back({name, "var", s->tok.line});
         }
     }
@@ -59,11 +59,11 @@ struct Index {
 
     bool connection(size_t unit, const std::string& alias, size_t& target, std::string& written) const {
         for (const auto& s : units[unit].parsed.module.body) {
-            if (!s || s->kind != StmtKind::Connect || s->connect_alias != alias) continue;
-            auto it = by_path.find(canon_path(fs::path(units[unit].path).parent_path() / s->connect_path));
+            if (!s || s->kind != StmtKind::Connect || s->aux().connect_alias != alias) continue;
+            auto it = by_path.find(canon_path(fs::path(units[unit].path).parent_path() / s->aux().connect_path));
             if (it == by_path.end()) return false;
             target = it->second;
-            written = s->connect_path;
+            written = s->aux().connect_path;
             return true;
         }
         return false;
@@ -71,7 +71,7 @@ struct Index {
 
     std::vector<const Stmt*> explains_of(size_t unit, const std::string& name) const {
         std::vector<const Stmt*> out;
-        for (const auto& e : units[unit].parsed.module.explains) if (e->explain_name == name) out.push_back(e.get());
+        for (const auto& e : units[unit].parsed.module.explains) if (e->aux().explain_name == name) out.push_back(e.get());
         return out;
     }
 };
@@ -126,11 +126,11 @@ void print_name(const Index& idx, size_t unit, const std::string& name, const De
         std::cout << name << " " << where << "\nno #explain has been written for it\n";
         return;
     }
-    std::cout << quoted(explains[0]->explain_text) << " " << where << "\n";
-    if (!explains[0]->explain_refs.empty()) {
+    std::cout << quoted(explains[0]->aux().explain_text) << " " << where << "\n";
+    if (!explains[0]->aux().explain_refs.empty()) {
         std::cout << "\nREFER: ";
         bool first = true;
-        for (const auto& ref : explains[0]->explain_refs) {
+        for (const auto& ref : explains[0]->aux().explain_refs) {
             if (!first) std::cout << ", ";
             first = false;
             const Resolved r = resolve(idx, unit, ref);
@@ -219,12 +219,12 @@ int explain_command(int argc, char** argv) {
                 listed.insert(d.name);
                 const auto ex = idx.explains_of(u, d.name);
                 std::cout << d.name << " (" << d.kind << "; line " << d.line << "): "
-                          << (ex.empty() ? std::string("no #explain") : quoted(ex[0]->explain_text)) << "\n";
+                          << (ex.empty() ? std::string("no #explain") : quoted(ex[0]->aux().explain_text)) << "\n";
             }
             for (const auto& e : units[u].parsed.module.explains)
-                if (!listed.count(e->explain_name) && e->explain_name.find("::") == std::string::npos) {
-                    listed.insert(e->explain_name);
-                    std::cout << e->explain_name << " (not declared in this file): " << quoted(e->explain_text) << "\n";
+                if (!listed.count(e->aux().explain_name) && e->aux().explain_name.find("::") == std::string::npos) {
+                    listed.insert(e->aux().explain_name);
+                    std::cout << e->aux().explain_name << " (not declared in this file): " << quoted(e->aux().explain_text) << "\n";
                 }
             if (idx.decls[u].empty() && units[u].parsed.module.explains.empty()) std::cout << "(no functions or variables)\n";
         }
@@ -282,14 +282,14 @@ std::vector<std::string> explain_warnings(const std::vector<SourceUnit>& units) 
         std::unordered_map<std::string, int> first_line;
         for (const auto& e : units[u].parsed.module.explains) {
             const std::string where = e->tok.loc() + ": warning: ";
-            auto seen = first_line.emplace(e->explain_name, e->tok.line);
+            auto seen = first_line.emplace(e->aux().explain_name, e->tok.line);
             if (!seen.second)
-                out.push_back(where + "'" + e->explain_name + "' is already explained on line " + std::to_string(seen.first->second));
-            if (!resolve(idx, u, e->explain_name).found)
-                out.push_back(where + "#explain: '" + e->explain_name + "' is not a function or variable at the top level of this file");
-            for (const auto& ref : e->explain_refs)
+                out.push_back(where + "'" + e->aux().explain_name + "' is already explained on line " + std::to_string(seen.first->second));
+            if (!resolve(idx, u, e->aux().explain_name).found)
+                out.push_back(where + "#explain: '" + e->aux().explain_name + "' is not a function or variable at the top level of this file");
+            for (const auto& ref : e->aux().explain_refs)
                 if (!resolve(idx, u, ref).found)
-                    out.push_back(where + "#explain " + e->explain_name + ": ref '" + ref + "' is not a function or variable it can reach (use namespace::name for connected files)");
+                    out.push_back(where + "#explain " + e->aux().explain_name + ": ref '" + ref + "' is not a function or variable it can reach (use namespace::name for connected files)");
         }
     }
     return out;

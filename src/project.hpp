@@ -25,6 +25,10 @@ struct ProjectInputs {
 bool resolve_project_inputs(const std::vector<std::string>& positional,
                             ProjectInputs& out, std::string& error);
 
+bool check_output_target(const std::string& output,
+                         const std::vector<std::string>& source_paths,
+                         std::string& error);
+
 bool load_program_sources(const ProjectInputs& inputs,
                           std::vector<SourceUnit>& out,
                           std::string& error,

@@ -46,6 +46,7 @@ public:
     T& operator*() const noexcept { return *get(); }
     explicit operator bool() const noexcept { return ctrl_ != nullptr; }
     bool unique() const noexcept { return ctrl_ && ctrl_->count == 1; }
+    size_t use_count() const noexcept { return ctrl_ ? static_cast<size_t>(ctrl_->count) : 0; }
 
     bool operator==(const Rc& other) const noexcept { return ctrl_ == other.ctrl_; }
     bool operator!=(const Rc& other) const noexcept { return ctrl_ != other.ctrl_; }

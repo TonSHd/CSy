@@ -1,5 +1,6 @@
 #include "suggest.hpp"
 #include <algorithm>
+#include <cctype>
 #include <numeric>
 #include <sstream>
 
@@ -27,13 +28,22 @@ std::vector<std::string> suggest(const std::string& target,
                                  const std::vector<std::string>& candidates,
                                  int max_distance) {
     std::vector<std::pair<int, std::string>> scored;
+    const int allowed = std::min(max_distance, std::max(1, static_cast<int>(target.size()) / 3));
+    auto lowered = [](std::string text) {
+        for (char& ch : text) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return text;
+    };
+    const std::string target_lower = lowered(target);
     for (const auto& c : candidates) {
         if (c.empty()) continue;
-        int d = edit_distance(target, c);
-        if (c.find(target) != std::string::npos || target.find(c) != std::string::npos) {
+        const bool same_ignoring_case = lowered(c) == target_lower && c != target;
+        if (!same_ignoring_case && (target.size() < 3 || c.size() < 3)) continue;
+        int d = same_ignoring_case ? 0 : edit_distance(target, c);
+        if (!same_ignoring_case &&
+            (c.find(target) != std::string::npos || target.find(c) != std::string::npos)) {
             d = std::max(0, d - 1);
         }
-        if (d <= max_distance) {
+        if (d <= allowed) {
             scored.emplace_back(d, c);
         }
     }

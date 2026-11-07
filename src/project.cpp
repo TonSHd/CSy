@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include "resource.hpp"
+#include <sys/stat.h>
 
 namespace csy {
 namespace fs = std::filesystem;
@@ -156,7 +157,7 @@ void read_lex_parse(const std::string& path, bool keep_tokens, Parsed& out) {
 
     for (const auto& stmt : out.unit.parsed.module.body) {
         if (stmt->kind != StmtKind::Connect) continue;
-        fs::path dependency = fs::path(stmt->connect_path);
+        fs::path dependency = fs::path(stmt->aux().connect_path);
         if (dependency.extension() != ".csy") continue;
         out.deps.push_back((fs::path(path).parent_path() / dependency).string());
     }
@@ -260,7 +261,7 @@ bool load_program_sources(const ProjectInputs& inputs,
         if (!parsed->error.empty()) {
             error = parsed->error;
             if (from) {
-                error = from->tok.loc() + ": " + error + " (named by #connect \"" + from->connect_path + "\")";
+                error = from->tok.loc() + ": " + error + " (named by #connect \"" + from->aux().connect_path + "\")";
             }
             return false;
         }
@@ -274,15 +275,15 @@ bool load_program_sources(const ProjectInputs& inputs,
             error = "compiler memory budget reached while parsing '" + path + "'";
             return false;
         }
-        if (parsed->failed_stage == 1) { error = "lexing failed in '" + path + "'"; out.push_back(std::move(unit)); return false; }
-        if (parsed->failed_stage == 2) { error = "parsing failed in '" + path + "'"; out.push_back(std::move(unit)); return false; }
+        if (parsed->failed_stage == 1) { error = "couldn't read '" + path + "', the lexer gave up on it"; out.push_back(std::move(unit)); return false; }
+        if (parsed->failed_stage == 2) { error = "couldn't make sense of '" + path + "', the parser gave up on it"; out.push_back(std::move(unit)); return false; }
         parsed.reset();
         active.insert(path);
         for (const auto& stmt : unit.parsed.module.body) {
             if (stmt->kind != StmtKind::Connect) continue;
-            fs::path dependency = fs::path(stmt->connect_path);
+            fs::path dependency = fs::path(stmt->aux().connect_path);
             if (dependency.extension() != ".csy") {
-                error = stmt->tok.loc() + ": #connect expects a .csy source file, but got '" + stmt->connect_path + "'" +
+                error = stmt->tok.loc() + ": #connect expects a .csy source file, but got '" + stmt->aux().connect_path + "'" +
                         (dependency.extension() == ".csh" ? " (.csh interface files are not used any more: connect the .csy file itself)" :
                          dependency.extension() == ".cso" ? " (a .cso is the build output and cannot be connected: connect the .csy it was built from)" : "");
                 return false;
@@ -297,6 +298,65 @@ bool load_program_sources(const ProjectInputs& inputs,
 
     for (const auto& source : inputs.sources) if (!visit(source, false, 0, nullptr)) return false;
     if (!visit(inputs.entry, false, 0, nullptr)) return false;
+    return true;
+}
+
+
+bool check_output_target(const std::string& output,
+                         const std::vector<std::string>& source_paths,
+                         std::string& error) {
+    namespace fs = std::filesystem;
+    if (output.empty()) return true;
+    std::error_code ec;
+    const fs::path out_path(output);
+    if (out_path.extension() == ".csy") {
+        error = "the output name '" + output + "' ends in .csy, which is reserved for source files; choose another name";
+        return false;
+    }
+    {
+        fs::path parent = out_path.parent_path();
+        if (parent.empty()) parent = ".";
+        std::error_code dir_ec;
+        if (!fs::is_directory(parent, dir_ec)) {
+            error = "the folder '" + parent.string() + "' for the output '" + output + "' does not exist; create it first";
+            return false;
+        }
+    }
+    struct stat st{};
+    if (::stat(output.c_str(), &st) == 0) {
+        if (!S_ISREG(st.st_mode)) {
+            error = "'" + output + "' exists and is not a regular file, so it will not be replaced";
+            return false;
+        }
+        if (st.st_size > 0) {
+            char head[5] = {0, 0, 0, 0, 0};
+            std::ifstream existing(output, std::ios::binary);
+            existing.read(head, sizeof(head));
+            const bool csy_object = std::string(head, 5) == "CSYCO";
+            const bool elf_program = head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F';
+            if (!csy_object && !elf_program) {
+                error = "'" + output + "' already exists and is not a previous build output, so it will not be replaced; "
+                        "remove it or choose another output name";
+                return false;
+            }
+        }
+    }
+    const fs::path out_canon = fs::weakly_canonical(out_path, ec);
+    if (!ec) {
+        for (const auto& source : source_paths) {
+            std::error_code sec;
+            const fs::path src_canon = fs::weakly_canonical(fs::path(source), sec);
+            if (!sec && src_canon == out_canon) {
+                error = "the output file '" + output + "' is also a source file of this build and would be overwritten";
+                return false;
+            }
+            std::error_code eqec;
+            if (fs::exists(out_path, eqec) && fs::exists(fs::path(source), eqec) && fs::equivalent(out_path, fs::path(source), eqec)) {
+                error = "the output file '" + output + "' is also a source file of this build and would be overwritten";
+                return false;
+            }
+        }
+    }
     return true;
 }
 

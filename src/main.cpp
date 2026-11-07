@@ -3,6 +3,7 @@
 #include "ast_printer.hpp"
 #include "parser.hpp"
 #include "diagnostic.hpp"
+#include "buildlog.hpp"
 #include "semantic.hpp"
 #include "codegen.hpp"
 #include "ir.hpp"
@@ -10,6 +11,8 @@
 #include "ai_ops.hpp"
 #include "native_jit.hpp"
 #include "project.hpp"
+#include "process.hpp"
+#include "native_aot.hpp"
 #include "object_file.hpp"
 #include "linker.hpp"
 #include "explain.hpp"
@@ -65,6 +68,7 @@ static void print_usage() {
         "  csyc build [project.csp|file.csy]  Build without running it.\n"
         "  csyc build <file.csy> -o <out.cso>  Build one source file.\n"
         "  csyc build --verbose            Explain each build stage and show progress.\n"
+        "  csyc build --log <file>         Also write every stage, timing, memory figure and diagnostic to <file>.\n"
         "  csyc build --memory-limit <MB>  Set the aggregate compiler memory budget (default 2048).\n"
         "  csyc build --threads <N|auto>   Cap compiler worker threads (default: auto = CPUs, at most 8,\n"
         "                                  reduced further if the memory budget cannot hold that many).\n"
@@ -84,6 +88,7 @@ static void print_usage() {
         "  csyc <file.csy> -- <args...>   Pass arguments to bc::args().\n"
         "  csyc .                         Compile ./main.csy in the current directory.\n"
         "  csyc <file> --run-threads N    Threads for the built-in AI kernels at run time (default: auto).\n"
+        "  csyc build <file.csy> --native-exe -o <app>  Experimental strict native executable (integer main subset).\n"
         "  csyc build <file> --exe -o <app>  Write a standalone executable (runtime + program; no csyc needed to run it).\n"
         "  csyc build <file> --no-native  Skip the native fast path (much faster builds; the object runs interpreted).\n"
         "  csyc <file> --explain-native   Report which functions run natively and why the rest do not.\n"
@@ -183,6 +188,11 @@ static uint64_t estimate_build_bytes(const std::vector<std::string>& inputs) {
     return kEstimateBaseBytes + total * kEstimatedBytesPerSourceByte;
 }
 
+static void emit_diags(const DiagBag& bag, const std::string& source) {
+    std::cerr << bag.format(source);
+    BuildLog::instance().note_diagnostics(bag);
+}
+
 struct BuildProgress {
     bool verbose;
     bool tty;
@@ -190,6 +200,7 @@ struct BuildProgress {
     explicit BuildProgress(bool v) : verbose(v), tty(::isatty(STDERR_FILENO) != 0) {}
     void pause() const { if (tty) std::cerr << "\n"; }
     void stage(int step, const std::string& message) const {
+        BuildLog::instance().line("stage " + std::to_string(step) + "/" + std::to_string(total) + ": " + message);
         if (tty) {
             const int width = 24, filled = width * step / total;
             std::cerr << "\r[" << std::string((size_t)filled, '=')
@@ -252,7 +263,9 @@ bool write_standalone_exe(const std::string& exe_path, const std::string& object
         out.flush();
         if (!out) { error = "cannot write '" + exe_path + "'"; ::unlink(tmp.c_str()); res::unregister_temp_path(tmp); return false; }
     }
-    if (::chmod(tmp.c_str(), 0755) != 0 || ::rename(tmp.c_str(), exe_path.c_str()) != 0) {
+    struct stat exe_target{};
+    const bool exe_target_special = ::stat(exe_path.c_str(), &exe_target) == 0 && !S_ISREG(exe_target.st_mode);
+    if (exe_target_special || ::chmod(tmp.c_str(), 0755) != 0 || ::rename(tmp.c_str(), exe_path.c_str()) != 0) {
         error = "cannot finalize '" + exe_path + "'";
         ::unlink(tmp.c_str());
         res::unregister_temp_path(tmp);
@@ -275,7 +288,7 @@ int run_embedded_program(const std::string& image, int argc, char** argv) {
     VM vm(std::move(args));
     res::set_tracking(false);
     VMResult result = vm.run(object);
-    if (!result.ok) { std::cerr << result.diags.format(""); return 1; }
+    if (!result.ok) { emit_diags(result.diags, ""); return 1; }
     return result.exit_code;
 }
 }
@@ -308,7 +321,7 @@ static int init_project(int argc, char** argv) {
     const std::vector<Item> items = {
         {target / "project.csp", "entry = \"src/main.csy\"\n"},
         {target / "src" / "main.csy", "#inc basic as bc;\n\nbc::out>\"Hello from " + name + "\";\nrt 0;\n"},
-        {target / ".gitignore", "*.cso\n"},
+        {target / ".gitignore", "*.cso\nccm_mem.bin\nccm_mem.lock\n"},
     };
     for (const auto& item : items) {
         if (fs::exists(item.path, ec)) {
@@ -506,7 +519,7 @@ static void warn_about_shadowing(const std::filesystem::path& target, bool insta
             std::cout << "note: another csyc is on your PATH after the first one: " << copies[i].string()
                       << " (" << have << "); it is not used\n";
         }
-        std::cout << "      remove it with: " << removal_command(copies[i]) << "\n";
+        std::cout << "      if you do not need that copy, remove it with: " << removal_command(copies[i]) << "\n";
         if (runs_first) std::cout << "      then run 'hash -r' or open a new terminal\n";
     }
 }
@@ -526,6 +539,12 @@ static int install_self(int argc, char** argv) {
         else { std::cerr << "error: usage is 'csyc install [--force] [--prefix DIR] [--yes] [--no-deps] [--dry-run]'\n"; return 1; }
     }
     if (prefix.empty()) { std::cerr << "error: --prefix needs a folder\n"; return 1; }
+    for (const char ch : prefix) {
+        if (static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f) {
+            std::cerr << "error: --prefix cannot contain control characters\n";
+            return 1;
+        }
+    }
     const osinfo::Os os = osinfo::detect_os();
     if (!osinfo::supported(os)) return refuse_unsupported_os(os, "csyc install");
     print_detected_os(os);
@@ -536,6 +555,19 @@ static int install_self(int argc, char** argv) {
     const fs::path dir = fs::absolute(fs::path(prefix), ec).lexically_normal() / "bin";
     const fs::path target = dir / "csyc";
     const fs::path root = dir.parent_path();
+
+    for (fs::path probe = root; !probe.empty(); probe = probe.parent_path()) {
+        std::error_code probe_ec;
+        if (fs::exists(probe, probe_ec)) {
+            if (!fs::is_directory(probe, probe_ec)) {
+                std::cerr << "error: the install prefix '" << root.string() << "' cannot be used because '" << probe.string()
+                          << "' exists and is not a folder\n";
+                return 1;
+            }
+            break;
+        }
+        if (probe == probe.parent_path()) break;
+    }
 
     if (fs::exists(target, ec)) {
         const bool this_is_it = fs::equivalent(self, target, ec);
@@ -733,6 +765,7 @@ static int csyc_main(int argc, char** argv) {
     bool explain_native = false;
     bool no_native = false;
     bool make_exe = false;
+    bool native_aot = false;
     uint64_t memory_limit_mb = 2048;
     if (const char* env_limit = std::getenv("CSYC_MEMORY_LIMIT_MB")) {
         char* end = nullptr;
@@ -777,6 +810,13 @@ static int csyc_main(int argc, char** argv) {
             verbose = true;
             continue;
         }
+        if (a == "--log") {
+            if (i + 1 >= argc) { std::cerr << "error: --log needs a file name to write the build log to\n"; return 1; }
+            std::string why;
+            if (!BuildLog::instance().open(argv[++i], why)) { std::cerr << "error: can't use that log file, " << why << "\n"; return 1; }
+            BuildLog::instance().line(std::string("csyc ") + CSYC_VERSION + " started");
+            continue;
+        }
         if (a == "--run-threads") {
             if (i + 1 >= argc) { std::cerr << "error: --run-threads requires 'auto' or a number from 1 to 256\n"; return 1; }
             if (std::string(argv[i + 1]) == "auto") { ++i; set_ai_run_threads(0); continue; }
@@ -798,6 +838,10 @@ static int csyc_main(int argc, char** argv) {
             make_exe = true;
             continue;
         }
+        if (a == "--native-exe") {
+            native_aot = true;
+            continue;
+        }
         if (a == "--no-native") {
             no_native = true;
             continue;
@@ -808,6 +852,10 @@ static int csyc_main(int argc, char** argv) {
                 return 1;
             }
             output_path = argv[++i];
+            if (output_path.empty()) {
+                std::cerr << "error: -o requires a non-empty output filename\n";
+                return 1;
+            }
             continue;
         }
         if (a == "--memory-limit") {
@@ -837,6 +885,11 @@ static int csyc_main(int argc, char** argv) {
             return 1;
         }
         input_paths.push_back(a);
+    }
+
+    if (native_aot && (!build_only || output_path.empty() || make_exe || no_native || !program_args.empty())) {
+        std::cerr << "error: --native-exe requires 'csyc build <source> --native-exe -o <output>' and does not accept --exe, --no-native, or program arguments\n";
+        return 1;
     }
 
     if (build_only && input_paths.empty()) input_paths.emplace_back("project.csp");
@@ -951,6 +1004,10 @@ static int csyc_main(int argc, char** argv) {
 
     const bool object_input = input_paths.size() == 1 &&
         std::filesystem::path(input_paths[0]).extension() == ".cso";
+    if (native_aot && object_input) {
+        std::cerr << "error: --native-exe requires CSy source, not a compiled bytecode object\n";
+        return 1;
+    }
     if (!object_input && !resource_guard.acquire_build_slot(estimate_build_bytes(input_paths))) return 1;
     if (!resource_guard.check(object_input ? "loading a compiled object" : "starting compilation")) return 1;
 
@@ -978,7 +1035,7 @@ static int csyc_main(int argc, char** argv) {
         ccm::user_code(true);
         VMResult result = vm.run(object);
         ccm::user_code(false);
-        if (!result.ok) { std::cerr << result.diags.format(""); return 1; }
+        if (!result.ok) { emit_diags(result.diags, ""); return 1; }
         return result.exit_code;
     }
 
@@ -1002,11 +1059,25 @@ static int csyc_main(int argc, char** argv) {
         }
     }
     if (output_path.empty()) output_path = project_inputs.output;
+    {
+        std::vector<std::string> early_sources = project_inputs.sources;
+        early_sources.push_back(project_inputs.entry);
+        std::string target_error;
+        if (!check_output_target(output_path, early_sources, target_error)) {
+            std::cerr << "error: " << target_error << "\n";
+            return 1;
+        }
+    }
     BuildProgress progress(verbose && !deep);
+    BuildLog::instance().line("build of '" + project_inputs.entry + "' with " + std::to_string(worker_threads) +
+                              " worker thread(s), memory budget " + std::to_string(memory_limit_mb) + " MiB");
     if (verbose) std::cerr << "CSy is preparing a project build from '" << project_inputs.entry << "' using "
                            << worker_threads << " worker thread(s).\n";
     const bool profile_memory = std::getenv("CSY_PROFILE") != nullptr;
     auto mem_mark = [profile_memory](const char* stage) {
+        BuildLog::instance().line(std::string("memory at ") + stage + ": in use " +
+                                  std::to_string(static_cast<long long>(res::tracked_bytes() / (1024 * 1024))) +
+                                  " MiB, peak " + std::to_string(static_cast<long long>(res::peak_tracked_bytes() / (1024 * 1024))) + " MiB");
         if (!profile_memory) return;
         std::fprintf(stderr, "[csy-profile] mem stage=%s live_mib=%.1f peak_mib=%.1f\n", stage,
                      res::tracked_bytes() / (1024.0 * 1024.0), res::peak_tracked_bytes() / (1024.0 * 1024.0));
@@ -1019,10 +1090,10 @@ static int csyc_main(int argc, char** argv) {
         if (resource_guard.exceeded()) project_error = "compiler memory budget reached while processing project sources";
         std::cerr << "error: " << project_error << "\n";
         for (const auto& unit : units) {
-            if (!unit.parsed.diags.items().empty()) std::cerr << unit.parsed.diags.format(unit.source);
+            if (!unit.parsed.diags.items().empty()) emit_diags(unit.parsed.diags, unit.source);
             if (!unit.lexed.ok && !unit.lexed.tokens.empty()) {
                 DiagBag d; const Token& e = unit.lexed.tokens[0]; d.error(unit.path, e.line, e.col, e.text);
-                std::cerr << d.format(unit.source);
+                emit_diags(d, unit.source);
             }
         }
         return 1;
@@ -1038,7 +1109,7 @@ static int csyc_main(int argc, char** argv) {
     const auto parse_finished = source_read_finished;
     bool front_end_failed = false;
     for (const auto& unit : units) {
-        if (!unit.parsed.diags.items().empty()) std::cerr << unit.parsed.diags.format(unit.source);
+        if (!unit.parsed.diags.items().empty()) emit_diags(unit.parsed.diags, unit.source);
         if (!unit.parsed.ok) front_end_failed = true;
         if (deep) {
             std::cout << "[stage] " << unit.path << ": lexed " << unit.lexed.tokens.size() << " tokens\n";
@@ -1047,7 +1118,18 @@ static int csyc_main(int argc, char** argv) {
             std::cout << "[stage] AST: " << unit.path << "\n" << print_ast(unit.parsed.module) << "\n";
         }
     }
-    if (front_end_failed) { std::cerr << "  project could not be parsed.\n"; return 1; }
+    if (front_end_failed) { std::cerr << "  the project didn't parse, so I stopped here before building anything.\n"; return 1; }
+    std::filesystem::path approval_root;
+    if (std::filesystem::path(input_paths.front()).extension() == ".csp")
+        approval_root = std::filesystem::path(input_paths.front()).parent_path();
+    else
+        approval_root = std::filesystem::path(project_inputs.entry).parent_path();
+    if (approval_root.empty()) approval_root = std::filesystem::current_path();
+    std::string approval_error;
+    if (!approve_process_calls(units, approval_root.string(), approval_error)) {
+        std::cerr << "error: " << approval_error << "\n";
+        return 1;
+    }
     progress.stage(2, "All source files have valid syntax");
     if (!resource_guard.check("project linking")) return 1;
     Module linked_ast; linked_ast.file = input_path;
@@ -1058,10 +1140,10 @@ static int csyc_main(int argc, char** argv) {
     for (const auto& unit : units) {
         for (const auto& s : unit.parsed.module.body) {
             if (s->kind == StmtKind::Import) {
-                auto prior = project_inc_aliases.emplace(s->import_alias, std::make_pair(s->import_module, s->tok.loc()));
-                if (!prior.second && prior.first->second.first != s->import_module) {
-                    std::cerr << "error: " << s->tok.loc() << ": '#inc " << s->import_module << " as " << s->import_alias
-                              << "' conflicts with '#inc " << prior.first->second.first << " as " << s->import_alias << "' at "
+                auto prior = project_inc_aliases.emplace(s->aux().import_alias, std::make_pair(s->aux().import_module, s->tok.loc()));
+                if (!prior.second && prior.first->second.first != s->aux().import_module) {
+                    std::cerr << "error: " << s->tok.loc() << ": '#inc " << s->aux().import_module << " as " << s->aux().import_alias
+                              << "' conflicts with '#inc " << prior.first->second.first << " as " << s->aux().import_alias << "' at "
                               << prior.first->second.second << " (an #inc alias must mean the same module everywhere in a project)\n";
                     return 1;
                 }
@@ -1070,12 +1152,12 @@ static int csyc_main(int argc, char** argv) {
     }
     for (const auto& unit : units) {
         for (const auto& s : unit.parsed.module.body) {
-            if (s->kind != StmtKind::Connect || !s->connect_all) continue;
+            if (s->kind != StmtKind::Connect || !s->aux().connect_all) continue;
             const std::string dep = std::filesystem::weakly_canonical(
-                std::filesystem::path(unit.path).parent_path() / s->connect_path).string();
+                std::filesystem::path(unit.path).parent_path() / s->aux().connect_path).string();
             auto target = by_path.find(dep);
             if (target == by_path.end()) continue;
-            s->connect_exports = top_level_names(target->second->parsed.module, false);
+            s->aux_mut().connect_exports = top_level_names(target->second->parsed.module, false);
         }
     }
     for (const auto& unit : units) {
@@ -1083,25 +1165,25 @@ static int csyc_main(int argc, char** argv) {
         for (const auto& s : unit.parsed.module.body) {
             if (s->kind == StmtKind::Connect) {
                 const std::string target = std::filesystem::weakly_canonical(
-                    std::filesystem::path(unit.path).parent_path() / s->connect_path).string();
-                auto inc = project_inc_aliases.find(s->connect_alias);
+                    std::filesystem::path(unit.path).parent_path() / s->aux().connect_path).string();
+                auto inc = project_inc_aliases.find(s->aux().connect_alias);
                 if (inc != project_inc_aliases.end()) {
-                    std::cerr << "error: " << s->tok.loc() << ": the #connect namespace '" << s->connect_alias
-                              << "' is already the name of '#inc " << inc->second.first << " as " << s->connect_alias << "' (at "
+                    std::cerr << "error: " << s->tok.loc() << ": the #connect namespace '" << s->aux().connect_alias
+                              << "' is already the name of '#inc " << inc->second.first << " as " << s->aux().connect_alias << "' (at "
                               << inc->second.second << "); choose a different name after 'as'\n";
                     return 1;
                 }
-                auto prior = file_connect_aliases.emplace(s->connect_alias, std::make_pair(target, s->tok.loc()));
+                auto prior = file_connect_aliases.emplace(s->aux().connect_alias, std::make_pair(target, s->tok.loc()));
                 if (!prior.second && prior.first->second.first != target) {
-                    std::cerr << "error: " << s->tok.loc() << ": the namespace '" << s->connect_alias << "' already names a different file in this file (at "
+                    std::cerr << "error: " << s->tok.loc() << ": the namespace '" << s->aux().connect_alias << "' already names a different file in this file (at "
                               << prior.first->second.second << ")\n";
                     return 1;
                 }
             }
             if (s->kind == StmtKind::FuncDecl) {
-                auto inserted = symbols.emplace(s->func_name, unit.path);
+                auto inserted = symbols.emplace(s->aux().func_name, unit.path);
                 if (!inserted.second && inserted.first->second == unit.path) {
-                    std::cerr << "error: function '" << s->func_name << "' is defined more than once in '"
+                    std::cerr << "error: function '" << s->aux().func_name << "' is defined more than once in '"
                               << unit.path << "'\n";
                     return 1;
                 }
@@ -1109,24 +1191,24 @@ static int csyc_main(int argc, char** argv) {
         }
         for (const auto& s : unit.parsed.module.body) if (s->kind == StmtKind::Connect) {
             std::filesystem::path dep = std::filesystem::weakly_canonical(
-                std::filesystem::path(unit.path).parent_path() / s->connect_path);
+                std::filesystem::path(unit.path).parent_path() / s->aux().connect_path);
             auto target = by_path.find(dep.string());
             if (target == by_path.end()) {
                 std::cerr << "error: connected file was not loaded: '" << dep.string() << "'\n";
                 return 1;
             }
-            if (s->connect_all) continue;
+            if (s->aux().connect_all) continue;
             const std::vector<std::string> available_names = top_level_names(target->second->parsed.module, true);
             const std::unordered_set<std::string> available(available_names.begin(), available_names.end());
             std::unordered_set<std::string> unique;
-            for (const auto& name : s->connect_exports) {
+            for (const auto& name : s->aux().connect_exports) {
                 if (!unique.insert(name).second) {
                     std::cerr << "error: " << s->tok.loc() << ": '#connect' lists '" << name << "' more than once\n";
                     return 1;
                 }
                 if (!available.count(name)) {
                     std::cerr << "error: " << s->tok.loc() << ": '" << name << "' is not declared at the top level of '"
-                              << dep.string() << "' (the file named by #connect \"" << s->connect_path << "\")\n";
+                              << dep.string() << "' (the file named by #connect \"" << s->aux().connect_path << "\")\n";
                     return 1;
                 }
                 if (!name.empty() && name[0] == '_') {
@@ -1160,14 +1242,14 @@ static int csyc_main(int argc, char** argv) {
     });
     for (size_t i = 0; i < units.size(); ++i) {
         const SemanticResult& sem_r = semantic_results[i];
-        if (!sem_r.diags.items().empty()) std::cerr << sem_r.diags.format(units[i].source);
+        if (!sem_r.diags.items().empty()) emit_diags(sem_r.diags, units[i].source);
         if (!sem_r.ok) semantic_ok = false;
         all_using_aliases.insert(all_using_aliases.end(), sem_r.using_aliases.begin(), sem_r.using_aliases.end());
     }
     const auto semantic_finished = ProfileClock::now();
     mem_mark("after_semantic");
     if (!semantic_ok) {
-        std::cerr << "  compilation failed during semantic analysis.\n";
+        std::cerr << "  it fell over in the checking stage (semantic analysis), so nothing got built.\n";
         return 1;
     }
     for (const auto& w : explain_warnings(units)) std::cerr << w << "\n";
@@ -1186,15 +1268,26 @@ static int csyc_main(int argc, char** argv) {
     if (deep) std::cout << "[stage] code generation...\n";
     stage_started = ProfileClock::now();
     const auto codegen_started = stage_started;
-    if (!no_native) outline_top_level_loops(linked_ast);
+    if (!no_native) {
+        outline_top_level_loops(linked_ast);
+        prepare_native_fallbacks(linked_ast);
+    }
     CodegenResult cg_r = generate(linked_ast, all_using_aliases, source, builtin_names);
     const auto codegen_finished = ProfileClock::now();
     if (!cg_r.diags.items().empty()) {
-        std::cerr << cg_r.diags.format(source);
+        emit_diags(cg_r.diags, source);
     }
     if (!cg_r.ok) {
-        std::cerr << "  compilation failed during code generation.\n";
+        std::cerr << "  it fell over while generating code, so nothing got built.\n";
         return 1;
+    }
+    for (const auto& u : units) cg_r.module.unit_files.push_back(u.path);
+    {
+        std::string target_error;
+        if (!check_output_target(output_path, cg_r.module.unit_files, target_error)) {
+            std::cerr << "error: " << target_error << "\n";
+            return 1;
+        }
     }
     progress.stage(4, "Generated one unified bytecode module");
     mem_mark("after_codegen");
@@ -1208,12 +1301,26 @@ static int csyc_main(int argc, char** argv) {
     progress.pause();
     if (no_native) ::setenv("CSY_NO_NATIVE_JIT", "1", 1);
     const NativeReport native_report = try_native_compile(
-        linked_ast, cg_r.module, build_only ? NativeMode::Build : NativeMode::Run, !output_path.empty());
+        linked_ast, cg_r.module,
+        native_aot ? NativeMode::Aot : (build_only ? NativeMode::Build : NativeMode::Run),
+        !output_path.empty());
     const auto jit_finished = ProfileClock::now();
-    progress.stage(5, build_only ? "Built native fast path for the object" : "Finished native fast-path analysis");
+    progress.stage(5, native_aot ? "Generated native AOT source" :
+                   (build_only ? "Built native fast path for the object" : "Finished native fast-path analysis"));
     if (explain_native) std::cerr << format_native_report(native_report);
     else if (build_only && !native_report.functions.empty()) std::cerr << "[csy] " << summarize_native_report(native_report) << "\n";
     if (!resource_guard.check("native fast-path analysis")) return 1;
+
+    if (native_aot) {
+        std::string native_error;
+        if (!write_native_aot(linked_ast, cg_r.module, native_report, output_path, native_error)) {
+            std::cerr << "error: " << native_error << "\n";
+            return 1;
+        }
+        resource_guard.release_build_slot();
+        std::cout << "[csy] native executable built: " << output_path << "\n";
+        return 0;
+    }
 
     if (!output_path.empty()) {
         std::error_code ec;
@@ -1242,6 +1349,10 @@ static int csyc_main(int argc, char** argv) {
     mem_mark("after_object_write");
     resource_guard.release_build_slot();
 
+    BuildLog::instance().line(std::string("build completed, ") +
+                              (output_path.empty() ? std::string("no output file was requested") : "wrote '" + output_path + "'") +
+                              ", peak memory " +
+                              std::to_string(static_cast<long long>(res::peak_tracked_bytes() / (1024 * 1024))) + " MiB");
     if (build_only) {
         std::cout << "[csy] build completed: " << output_path << "\n";
         if (std::getenv("CSY_PROFILE")) {
@@ -1260,11 +1371,15 @@ static int csyc_main(int argc, char** argv) {
     const uint64_t compile_peak_bytes = res::peak_tracked_bytes();
     res::set_tracking(false);
     ccm::user_code(true);
+    BuildLog::instance().line("program started");
     VMResult vm_r = vm.run(cg_r.module);
     ccm::user_code(false);
+    BuildLog::instance().line(vm_r.ok ? "program finished, exit code " + std::to_string(vm_r.exit_code) : std::string("program stopped with a runtime error"));
     const auto vm_finished = ProfileClock::now();
     if (!vm_r.ok) {
-        std::cerr << vm_r.diags.format(source);
+        bool same_file = true;
+        for (const auto& d : vm_r.diags.items()) if (d.file != cg_r.module.file) same_file = false;
+        emit_diags(vm_r.diags, same_file ? source : std::string());
         return 1;
     }
     if (verbose) std::cerr << "\n[run] Program finished successfully.\n";
@@ -1325,4 +1440,3 @@ int main(int argc, char** argv) {
     });
     return code;
 }
-

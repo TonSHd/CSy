@@ -30,12 +30,16 @@ set(CSY_SOURCES
     src/linker.cpp
     src/explain.cpp
     src/diagnostic.cpp
+    src/voice.cpp
     src/suggest.cpp
     src/semantic.cpp
     src/codegen.cpp
     src/ir.cpp
     src/value.cpp
     src/builtins_ext.cpp
+    src/builtins_std.cpp
+    src/builtins_general.cpp
+    src/process.cpp
     src/compress.cpp
     src/zstd.cpp
     src/json.cpp
@@ -46,12 +50,14 @@ set(CSY_SOURCES
     src/pi.cpp
     src/gpu_nvidia.cpp
     src/native_jit.cpp
+    src/native_aot.cpp
     src/tui.cpp
     src/vm.cpp
     src/main.cpp
 )
 
 add_executable(csyc ${CSY_SOURCES})
+set_source_files_properties(src/vm.cpp PROPERTIES COMPILE_OPTIONS "-O2")
 find_package(Threads REQUIRED)
 target_link_libraries(csyc PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 target_link_options(csyc PRIVATE -static-libstdc++ -static-libgcc)

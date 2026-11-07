@@ -1,4 +1,5 @@
 #include "builtins_ext.hpp"
+#include "utf8.hpp"
 #include "pi.hpp"
 #include "vm.hpp"
 #include "value.hpp"
@@ -30,7 +31,7 @@ static double to_double(const Value& v) {
     if (v.type == Value::Float) return v.float_val;
     if (v.type == Value::Int) return (double)v.int_val;
     if (v.type == Value::Bool) return v.bool_val ? 1.0 : 0.0;
-    return 0.0;
+    throw std::runtime_error(std::string("expected a number but got ") + v.type_name());
 }
 
 static long long to_int(const Value& v) {
@@ -42,13 +43,12 @@ static long long to_int(const Value& v) {
             wide < static_cast<long double>(std::numeric_limits<long long>::min()) ||
             wide >= -static_cast<long double>(std::numeric_limits<long long>::min()))
             throw std::runtime_error("float is outside the integer range");
+        if (number != std::floor(number))
+            throw std::runtime_error("expected a whole number but got " + v.to_display());
         return static_cast<long long>(number);
     }
     if (v.type == Value::Bool) return v.bool_val ? 1 : 0;
-    if (v.type == Value::Str) {
-        try { return std::stoll(*v.str_val); } catch (...) { return 0; }
-    }
-    return 0;
+    throw std::runtime_error(std::string("expected a whole number but got ") + v.type_name());
 }
 
 static constexpr long long kMaxTensorElems = 1LL << 27;
@@ -62,7 +62,21 @@ static void require_tensor_size(long long rows, long long cols, const char* what
     }
 }
 
-static Value apply_elementwise(const Value& v, double (*fn)(double), const std::string& name, int depth = 0) {
+static double round_to_digits(double x, long long digits) {
+    if (!std::isfinite(x)) return x;
+    if (digits >= 0) {
+        if (digits > 17) return x;
+        char buf[512];
+        std::snprintf(buf, sizeof buf, "%.*f", static_cast<int>(digits), x);
+        return std::strtod(buf, nullptr);
+    }
+    if (digits < -308) return x < 0 ? -0.0 : 0.0;
+    const double scale = std::pow(10.0, static_cast<double>(-digits));
+    return std::round(x / scale) * scale;
+}
+
+template <class F>
+static Value apply_elementwise(const Value& v, F&& fn, const std::string& name, int depth = 0) {
     if (depth > 256) {
         throw std::runtime_error("tensor nesting is too deep (is a vector containing itself?)");
     }
@@ -271,7 +285,7 @@ static Value deep_copy_value(const Value& v, int depth) {
             return out;
         }
         case Value::Dict: {
-            std::unordered_map<std::string, Value> copy;
+            DictMap copy;
             copy.reserve(v.dict_val->size());
             for (const auto& kv : *v.dict_val) copy.emplace(kv.first, deep_copy_value(kv.second, depth + 1));
             return Value::make_dict(std::move(copy));
@@ -303,11 +317,19 @@ void register_extended_builtins(VM& vm) {
     add_math1("log10", std::log10);
     add_math1("floor", std::floor);
     add_math1("ceil",  std::ceil);
-    add_math1("round", std::round);
+    builtins["round"] = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || args.size() > 2)
+            throw std::runtime_error("bc::round expects a number, a vector or an f64_array, and an optional number of digits");
+        if (args.size() == 1) return apply_elementwise(args[0], [](double x) { return std::round(x); }, "round");
+        if (args[1].type != Value::Int)
+            throw std::runtime_error("bc::round expects the number of digits as an integer (got " + args[1].type_name() + ")");
+        const long long digits = args[1].int_val;
+        return apply_elementwise(args[0], [digits](double x) { return round_to_digits(x, digits); }, "round");
+    };
     add_math1("abs",   std::fabs);
     add_math1("sign",  [](double x){ return x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0); });
     add_math1("sigmoid", [](double x){ return 1.0 / (1.0 + std::exp(-x)); });
-    add_math1("relu", [](double x){ return x > 0.0 ? x : 0.0; });
+    add_math1("relu", [](double x){ return x > 0.0 ? x : (x != x ? x : 0.0); });
     add_math1("tanh", std::tanh);
     add_math1("sigmoid_deriv", [](double y){ return y * (1.0 - y); });
     add_math1("relu_deriv", [](double y){ return y > 0.0 ? 1.0 : 0.0; });
@@ -328,7 +350,8 @@ void register_extended_builtins(VM& vm) {
     auto extreme = [](const char* name, bool want_max, std::vector<Value>& args) -> Value {
         if (args.empty()) throw std::runtime_error(std::string("bc::") + name + " expects numbers, a vector or an f64_array");
         auto better = [want_max](double x, double best) {
-            if (std::isnan(best)) return !std::isnan(x);
+            if (std::isnan(best)) return false;
+            if (std::isnan(x)) return true;
             return want_max ? x > best : x <= best;
         };
         if (args.size() == 1 && args[0].type == Value::F64Array) {
@@ -497,13 +520,13 @@ void register_extended_builtins(VM& vm) {
         if (args.empty()) return Value::make_int(0);
         if (args.size() == 1) {
             long long lo = 0, hi = to_int(args[0]);
-            if (hi < lo) std::swap(lo, hi);
+            if (hi < lo) throw std::runtime_error("bc::randint needs the lower bound to be at most the upper bound");
             std::uniform_int_distribution<long long> dist(lo, hi);
             return Value::make_int(dist(rng()));
         }
         long long lo = to_int(args[0]);
         long long hi = to_int(args[1]);
-        if (hi < lo) std::swap(lo, hi);
+        if (hi < lo) throw std::runtime_error("bc::randint needs the lower bound to be at most the upper bound");
         std::uniform_int_distribution<long long> dist(lo, hi);
         return Value::make_int(dist(rng()));
     };
@@ -516,7 +539,8 @@ void register_extended_builtins(VM& vm) {
     builtins["zeros"] = [](VM&, std::vector<Value>& args) -> Value {
         long long rows = args.size() > 0 ? to_int(args[0]) : 0;
         long long cols = args.size() > 1 ? to_int(args[1]) : 0;
-        if (rows <= 0 || cols <= 0) return Value::make_vec({});
+        if (rows < 0 || cols < 0) throw std::runtime_error("tensor sizes cannot be negative");
+        if (rows == 0 || cols == 0) return Value::make_vec({});
         require_tensor_size(rows, cols, "zeros");
         std::vector<Value> result;
         result.reserve(rows);
@@ -532,7 +556,8 @@ void register_extended_builtins(VM& vm) {
     builtins["ones"] = [](VM&, std::vector<Value>& args) -> Value {
         long long rows = args.size() > 0 ? to_int(args[0]) : 0;
         long long cols = args.size() > 1 ? to_int(args[1]) : 0;
-        if (rows <= 0 || cols <= 0) return Value::make_vec({});
+        if (rows < 0 || cols < 0) throw std::runtime_error("tensor sizes cannot be negative");
+        if (rows == 0 || cols == 0) return Value::make_vec({});
         require_tensor_size(rows, cols, "ones");
         std::vector<Value> result;
         result.reserve(rows);
@@ -550,7 +575,8 @@ void register_extended_builtins(VM& vm) {
         long long cols = args.size() > 1 ? to_int(args[1]) : 0;
         double lo = args.size() > 2 ? to_double(args[2]) : 0.0;
         double hi = args.size() > 3 ? to_double(args[3]) : 1.0;
-        if (rows <= 0 || cols <= 0) return Value::make_vec({});
+        if (rows < 0 || cols < 0) throw std::runtime_error("tensor sizes cannot be negative");
+        if (rows == 0 || cols == 0) return Value::make_vec({});
         require_tensor_size(rows, cols, "rand_mat");
         if (!std::isfinite(lo) || !std::isfinite(hi)) throw std::runtime_error("rand_mat: bounds must be finite numbers");
         if (hi < lo) std::swap(lo, hi);
@@ -568,7 +594,8 @@ void register_extended_builtins(VM& vm) {
 
     builtins["eye"] = [](VM&, std::vector<Value>& args) -> Value {
         long long n = args.empty() ? 0 : to_int(args[0]);
-        if (n <= 0) return Value::make_vec({});
+        if (n < 0) throw std::runtime_error("tensor sizes cannot be negative");
+        if (n == 0) return Value::make_vec({});
         require_tensor_size(n, n, "eye");
         std::vector<Value> result;
         result.reserve(n);
@@ -649,7 +676,12 @@ void register_extended_builtins(VM& vm) {
         std::vector<Value> result;
         result.push_back(Value::make_int((long long)v.vec_val->size()));
         if (!v.vec_val->empty() && (*v.vec_val)[0].type == Value::Vec) {
-            result.push_back(Value::make_int((long long)(*v.vec_val)[0].vec_val->size()));
+            const size_t width = (*v.vec_val)[0].vec_val->size();
+            for (const auto& row : *v.vec_val) {
+                if (row.type != Value::Vec || row.vec_val->size() != width)
+                    throw std::runtime_error("bc::shape: ragged tensor (rows of different widths)");
+            }
+            result.push_back(Value::make_int((long long)width));
         }
         return Value::make_vec(std::move(result));
     };
@@ -702,7 +734,7 @@ void register_extended_builtins(VM& vm) {
     };
 
     builtins["dot"] = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.size() < 2) return Value::make_float(0.0);
+        if (args.size() < 2) throw std::runtime_error("dot requires two vectors or f64_arrays");
         const bool a_ok = args[0].type == Value::Vec || args[0].type == Value::F64Array;
         const bool b_ok = args[1].type == Value::Vec || args[1].type == Value::F64Array;
         if (!a_ok || !b_ok) {
@@ -729,14 +761,22 @@ void register_extended_builtins(VM& vm) {
             for (const double x : *args[0].f64_array_val) fs += x;
             return Value::make_float(fs);
         }
-        if (args.empty() || args[0].type != Value::Vec) return Value::make_float(0.0);
+        if (args.empty() || args[0].type != Value::Vec)
+            throw std::runtime_error(std::string("bc::sum expects a vector or an f64_array") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
         double s = 0.0;
+        long long exact = 0;
         bool all_int = true;
+        bool exact_ok = true;
         for (const auto& e : *args[0].vec_val) {
             if (e.type != Value::Int) all_int = false;
+            if (all_int && __builtin_add_overflow(exact, e.int_val, &exact)) exact_ok = false;
             s += to_double(e);
         }
-        if (all_int) return Value::make_int((long long)s);
+        if (all_int) {
+            if (!exact_ok) throw std::runtime_error("bc::sum overflowed the integer range");
+            return Value::make_int(exact);
+        }
         return Value::make_float(s);
     };
 
@@ -773,8 +813,11 @@ void register_extended_builtins(VM& vm) {
             for (const double x : *args[0].f64_array_val) fs += x;
             return Value::make_float(fs / (double)args[0].f64_array_val->size());
         }
-        if (args.empty() || args[0].type != Value::Vec || args[0].vec_val->empty())
-            return Value::make_float(0.0);
+        if (args.empty() || (args[0].type != Value::Vec && args[0].type != Value::F64Array))
+            throw std::runtime_error(std::string("bc::mean expects a vector or an f64_array") +
+                                     (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
+        if (args[0].type == Value::F64Array || args[0].vec_val->empty())
+            throw std::runtime_error(std::string("bc::mean of an empty ") + (args[0].type == Value::F64Array ? "f64_array" : "vector"));
         double s = 0.0;
         for (const auto& e : *args[0].vec_val) s += to_double(e);
         return Value::make_float(s / (double)args[0].vec_val->size());
@@ -805,13 +848,13 @@ void register_extended_builtins(VM& vm) {
                 }
                 return Value::make_vec(std::move(picks));
             }
-            if (d.empty()) return Value::make_int(-1);
+            if (d.empty()) throw std::runtime_error("bc::argmax of an empty f64_array");
             size_t best_i = 0;
             for (size_t i = 1; i < d.size(); i++) if (d[i] > d[best_i]) best_i = i;
             return Value::make_int(static_cast<long long>(best_i));
         }
         if (args.size() >= 2) throw std::runtime_error("bc::argmax: cols applies only to an f64_array");
-        if (args[0].vec_val->empty()) return Value::make_int(-1);
+        if (args[0].vec_val->empty()) throw std::runtime_error("bc::argmax of an empty vector");
         const auto& v = *args[0].vec_val;
         size_t best = 0;
         double best_val = to_double(v[0]);
@@ -937,10 +980,14 @@ void register_extended_builtins(VM& vm) {
     builtins["split"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || args[0].type != Value::Str) return Value::make_vec({});
         const std::string& s = *args[0].str_val;
-        std::string sep = args.size() > 1 && args[1].type == Value::Str ? *args[1].str_val : " ";
+        std::string sep = args.size() > 1 && args[1].type == Value::Str ? std::string(*args[1].str_val) : std::string(" ");
         std::vector<Value> result;
         if (sep.empty()) {
-            for (char c : s) result.push_back(Value::make_str(std::string(1, c)));
+            for (size_t i = 0; i < s.size();) {
+                const size_t n = utf8_step(s, i);
+                result.push_back(Value::make_str(s.substr(i, n)));
+                i += n;
+            }
             return Value::make_vec(std::move(result));
         }
         size_t start = 0;
@@ -957,19 +1004,22 @@ void register_extended_builtins(VM& vm) {
             return Value::make_int(-1);
         size_t pos = args[0].str_val->find(*args[1].str_val);
         if (pos == std::string::npos) return Value::make_int(-1);
-        return Value::make_int((long long)pos);
+        return Value::make_int((long long)args[0].str_val->char_index_of_byte(pos));
     };
     builtins["substr"] = [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || args[0].type != Value::Str) return Value::make_str("");
-        const std::string& s = *args[0].str_val;
+        const StrObj& s = *args[0].str_val;
+        const long long total = (long long)s.char_count();
         long long start = args.size() > 1 ? to_int(args[1]) : 0;
-        long long len = args.size() > 2 ? to_int(args[2]) : (long long)s.size();
-        if (start < 0) start = 0;
-        if (start > (long long)s.size()) start = (long long)s.size();
-        if (len < 0) len = 0;
-        if (start + len > (long long)s.size()) len = (long long)s.size() - start;
-        if (len == 1) return vm.char_string(static_cast<unsigned char>(s[(size_t)start]));
-        return Value::make_str(s.substr(start, len));
+        long long len = args.size() > 2 ? to_int(args[2]) : total;
+        if (start < 0) throw std::runtime_error("bc::substr start cannot be negative");
+        if (len < 0) throw std::runtime_error("bc::substr length cannot be negative");
+        if (start > total) start = total;
+        if (len > total - start) len = total - start;
+        const size_t from = s.byte_offset((size_t)start);
+        const size_t to = len == 0 ? from : s.byte_offset((size_t)(start + len));
+        if (to - from == 1) return vm.char_string(static_cast<unsigned char>(s[from]));
+        return Value::make_str(s.substr(from, to - from));
     };
     builtins["replace"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 3 || args[0].type != Value::Str) return Value::make_str("");
@@ -1000,7 +1050,8 @@ void register_extended_builtins(VM& vm) {
     builtins["repeat"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || args[0].type != Value::Str) return Value::make_str("");
         long long n = args.size() > 1 ? to_int(args[1]) : 0;
-        if (n <= 0) return Value::make_str("");
+        if (n < 0) throw std::runtime_error("bc::repeat count cannot be negative");
+        if (n == 0) return Value::make_str("");
         std::string s;
         const size_t unit = args[0].str_val->size();
         const auto count = static_cast<unsigned long long>(n);
@@ -1026,7 +1077,7 @@ void register_extended_builtins(VM& vm) {
             throw std::runtime_error(std::string("bc::join expects a vector or an f64_array") +
                                      (args.empty() ? "" : std::string(" (got ") + args[0].type_name() + ")"));
         }
-        std::string sep = args.size() > 1 && args[1].type == Value::Str ? *args[1].str_val : " ";
+        std::string sep = args.size() > 1 && args[1].type == Value::Str ? std::string(*args[1].str_val) : std::string(" ");
         std::string out;
         if (args[0].type == Value::F64Array) {
             const std::vector<double>& d = *args[0].f64_array_val;
@@ -1098,8 +1149,17 @@ void register_extended_builtins(VM& vm) {
             return out;
         }
         if (args[0].type == Value::Str) {
-            std::string s = *args[0].str_val;
-            std::reverse(s.begin(), s.end());
+            const std::string& source = *args[0].str_val;
+            std::string s;
+            s.reserve(source.size());
+            size_t end = source.size();
+            std::vector<size_t> starts;
+            for (size_t i = 0; i < source.size();) { starts.push_back(i); i += utf8_step(source, i); }
+            for (size_t k = starts.size(); k-- > 0;) {
+                const size_t from = starts[k];
+                s.append(source, from, end - from);
+                end = from;
+            }
             return Value::make_str(s);
         }
         throw std::runtime_error(std::string("bc::reverse expects a vector, string or f64_array (got ") + args[0].type_name() + ")");
@@ -1204,11 +1264,16 @@ void register_extended_builtins(VM& vm) {
 
     builtins["read_file"] = [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || args[0].type != Value::Str) return Value::make_none();
+        {
+            std::error_code dir_ec;
+            if (std::filesystem::is_directory(std::string(*args[0].str_val), dir_ec))
+                throw std::runtime_error("read_file: '" + *args[0].str_val + "' is a directory, not a file");
+        }
         std::ifstream f(*args[0].str_val, std::ios::binary);
         if (!f) return Value::make_none();
         std::string content;
         std::error_code size_ec;
-        const auto declared = std::filesystem::file_size(*args[0].str_val, size_ec);
+        const auto declared = std::filesystem::file_size(std::string(*args[0].str_val), size_ec);
         if (!size_ec && declared > 0) {
             if (declared > kMaxFileReadBytes) throw std::runtime_error("read_file: file is larger than the 1 GiB safety limit");
             content.resize(static_cast<size_t>(declared));
@@ -1270,7 +1335,9 @@ void register_extended_builtins(VM& vm) {
     };
 
     builtins["exit"] = [](VM&, std::vector<Value>& args) -> Value {
-        int code = args.empty() ? 0 : (int)to_int(args[0]);
+        if (!args.empty() && args[0].type != Value::Int)
+            throw std::runtime_error("bc::exit expects an integer exit code (got " + args[0].type_name() + ")");
+        int code = args.empty() ? 0 : (int)args[0].int_val;
         std::exit(code);
     };
     builtins["args"] = [](VM& vm, std::vector<Value>&) -> Value {
@@ -1284,22 +1351,7 @@ void register_extended_builtins(VM& vm) {
 }
 
 static bool eq_values_local(const Value& a, const Value& b) {
-    if (a.type != b.type) {
-        if ((a.type == Value::Int || a.type == Value::Float) &&
-            (b.type == Value::Int || b.type == Value::Float)) {
-            return to_double(a) == to_double(b);
-        }
-        return false;
-    }
-    switch (a.type) {
-        case Value::None: return true;
-        case Value::Bool: return a.bool_val == b.bool_val;
-        case Value::Int:  return a.int_val == b.int_val;
-        case Value::Float:return a.float_val == b.float_val;
-        case Value::Str:  return *a.str_val == *b.str_val;
-        case Value::F64Array: return a.f64_array_val.get() == b.f64_array_val.get();
-        default: return false;
-    }
+    return values_equal(a, b);
 }
 
 }

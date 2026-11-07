@@ -32,6 +32,7 @@ public:
             }
             r.module.explains = std::move(explains_);
             if (!directive_aliases_.empty()) check_alias_collisions(r.module);
+            check_class_cycles();
             r.ok = !diags_.has_errors();
         } catch (const std::runtime_error& e) {
             diags_.error(file_, cur_line(), cur_col(), e.what());
@@ -59,7 +60,10 @@ private:
     size_t statement_depth_ = 0;
 
     struct AliasInfo { TokenType type; size_t decl_pos; int line; int col; std::string directive; };
+    struct ClassBase { std::string base; Token where; };
+    std::unordered_map<std::string, ClassBase> class_bases_;
     std::unordered_map<std::string, AliasInfo> directive_aliases_;
+    std::unordered_set<std::string> out_aliases_;
     std::vector<StmtPtr> explains_;
     static constexpr size_t kMaxExplainText = 4096;
     static constexpr size_t kMaxExplainRefs = 256;
@@ -82,21 +86,38 @@ private:
         if (check(TokenType::SEMI)) advance();
     }
 
+    void check_class_cycles() {
+        for (const auto& entry : class_bases_) {
+            std::unordered_set<std::string> seen{entry.first};
+            std::string at = entry.second.base;
+            while (true) {
+                if (at == entry.first) {
+                    error(entry.second.where, "class '" + entry.first + "' extends itself through its base classes");
+                    break;
+                }
+                if (!seen.insert(at).second) break;
+                auto next = class_bases_.find(at);
+                if (next == class_bases_.end()) break;
+                at = next->second.base;
+            }
+        }
+    }
+
     void check_alias_collisions(const Module& module) {
         std::unordered_map<std::string, std::string> used;
         for (const auto& s : module.body) {
             if (!s) continue;
             switch (s->kind) {
                 case StmtKind::FuncDecl:
-                    if (!s->func_name.empty() && s->func_name[0] != '$') used.emplace(s->func_name, "the function '" + s->func_name + "'");
+                    if (!s->aux().func_name.empty() && s->aux().func_name[0] != '$') used.emplace(s->aux().func_name, "the function '" + s->aux().func_name + "'");
                     break;
                 case StmtKind::VarDecl:
-                    if (s->expr && s->expr->kind == ExprKind::Assign && s->expr->target && s->expr->target->kind == ExprKind::Ident)
-                        used.emplace(s->expr->target->name, "the variable '" + s->expr->target->name + "'");
+                    if (s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target && s->expr->kids().target->kind == ExprKind::Ident)
+                        used.emplace(s->expr->kids().target->name, "the variable '" + s->expr->kids().target->name + "'");
                     break;
-                case StmtKind::Import: used.emplace(s->import_alias, "the #inc name '" + s->import_alias + "'"); break;
-                case StmtKind::Connect: used.emplace(s->connect_alias, "the #connect namespace '" + s->connect_alias + "'"); break;
-                case StmtKind::Using: used.emplace(s->using_alias, "the using name '" + s->using_alias + "'"); break;
+                case StmtKind::Import: used.emplace(s->aux().import_alias, "the #inc name '" + s->aux().import_alias + "'"); break;
+                case StmtKind::Connect: used.emplace(s->aux().connect_alias, "the #connect namespace '" + s->aux().connect_alias + "'"); break;
+                case StmtKind::Using: used.emplace(s->aux().using_alias, "the using name '" + s->aux().using_alias + "'"); break;
                 default: break;
             }
         }
@@ -148,7 +169,7 @@ private:
     int cur_col() const { return current().col; }
 
     void error(const Token& tok, const std::string& msg) {
-        diags_.error(file_, tok.line, tok.col, msg);
+        diags_.error(file_, tok.line, tok.col, msg, tok.text.empty() ? 1 : static_cast<int>(tok.text.size()));
         if (diags_.error_limit_reached()) {
             throw std::runtime_error("too many errors in this file - stopping here");
         }
@@ -157,9 +178,9 @@ private:
     ExprPtr seal(ExprPtr e) {
         uint32_t child = 0;
         auto take = [&](const ExprPtr& c) { if (c && c->depth > child) child = c->depth; };
-        take(e->left); take(e->right); take(e->operand); take(e->target); take(e->value);
-        take(e->callee); take(e->object); take(e->index);
-        for (const auto& a : e->args) take(a);
+        take(e->kids().left); take(e->kids().right); take(e->kids().operand); take(e->kids().target); take(e->kids().value);
+        take(e->kids().callee); take(e->kids().object); take(e->kids().index);
+        for (const auto& a : e->kids().args) take(a);
         e->depth = child + 1;
         if (e->depth > kMaxExprTreeDepth) {
             throw std::runtime_error("expression is too long or too deeply chained (limit " +
@@ -169,7 +190,7 @@ private:
         return e;
     }
     void warn(const Token& tok, const std::string& msg) {
-        diags_.warn(file_, tok.line, tok.col, msg);
+        diags_.warn(file_, tok.line, tok.col, msg, tok.text.empty() ? 1 : static_cast<int>(tok.text.size()));
     }
 
     StmtPtr parse_stmt() {
@@ -258,8 +279,8 @@ private:
         }
         expect(TokenType::SEMI, "';'");
         auto s = make_stmt(StmtKind::Import, inc);
-        s->import_module = module_name;
-        s->import_alias = alias;
+        s->aux_mut().import_module = module_name;
+        s->aux_mut().import_alias = alias;
         return s;
     }
 
@@ -293,10 +314,10 @@ private:
             return nullptr;
         }
         auto stmt = make_stmt(StmtKind::Connect, directive);
-        stmt->connect_path = path.text;
-        stmt->connect_alias = alias;
+        stmt->aux_mut().connect_path = path.text;
+        stmt->aux_mut().connect_alias = alias;
         if (!check(TokenType::LBRACE)) {
-            stmt->connect_all = true;
+            stmt->aux_mut().connect_all = true;
             expect(TokenType::SEMI, "';'");
             return stmt;
         }
@@ -307,7 +328,7 @@ private:
                 advance();
                 continue;
             }
-            stmt->connect_exports.push_back(advance().text);
+            stmt->aux_mut().connect_exports.push_back(advance().text);
             if (check(TokenType::SEMI) || check(TokenType::COMMA)) advance();
             else if (!check(TokenType::RBRACE)) {
                 error(current(), "expected ';' or ',' between connected names");
@@ -347,8 +368,8 @@ private:
             return nullptr;
         }
         auto s = make_stmt(StmtKind::DirectiveAlias, using_tok);
-        s->alias_directive = directive.text;
-        s->using_alias = alias.text;
+        s->aux_mut().alias_directive = directive.text;
+        s->aux_mut().using_alias = alias.text;
         return s;
     }
 
@@ -392,9 +413,9 @@ private:
         }
         expect(TokenType::SEMI, "';'");
         auto s = make_stmt(StmtKind::Explain, directive);
-        s->explain_name = name;
-        s->explain_text = text.text;
-        s->explain_refs = std::move(refs);
+        s->aux_mut().explain_name = name;
+        s->aux_mut().explain_text = text.text;
+        s->aux_mut().explain_refs = std::move(refs);
         explains_.push_back(s);
         return nullptr;
     }
@@ -416,9 +437,10 @@ private:
         }
         Token al = advance();
         expect(TokenType::SEMI, "';'");
+        if (e && e->kind == ExprKind::Member && e->name == "out") out_aliases_.insert(al.text);
         auto s = make_stmt(StmtKind::Using, u);
-        s->using_expr = e;
-        s->using_alias = al.text;
+        s->aux_mut().using_expr = e;
+        s->aux_mut().using_alias = al.text;
         return s;
     }
 
@@ -450,8 +472,8 @@ private:
         std::vector<StmtPtr> body = parse_block_body();
         expect_close(f, "'func " + name.text + "'");
         auto s = make_stmt(StmtKind::FuncDecl, f);
-        s->func_name = name.text;
-        s->params = std::move(params);
+        s->aux_mut().func_name = name.text;
+        s->aux_mut().params = std::move(params);
         s->body = std::move(body);
         return s;
     }
@@ -473,6 +495,12 @@ private:
                 return nullptr;
             }
             Token fld = advance();
+            for (const auto& existing : fields) {
+                if (existing == fld.text) {
+                    error(fld, "the field '" + fld.text + "' is declared twice in class " + class_name);
+                    break;
+                }
+            }
             fields.push_back(fld.text);
             if (check(TokenType::COMMA)) {
                 advance();
@@ -493,7 +521,13 @@ private:
                 return nullptr;
             }
             has_base = true;
-            base_name = advance().text;
+            const Token base_tok = advance();
+            base_name = base_tok.text;
+            if (base_name == class_name) {
+                error(base_tok, "class '" + class_name + "' cannot extend itself");
+            } else {
+                class_bases_[class_name] = ClassBase{base_name, base_tok};
+            }
             expect(TokenType::LPAREN, "'(' after base class name");
             while (!check(TokenType::RPAREN)) {
                 base_args.push_back(parse_expr());
@@ -517,17 +551,17 @@ private:
             }
             StmtPtr method = parse_func();
             if (!method) continue;
-            std::string bare_name = method->func_name;
+            std::string bare_name = method->aux().func_name;
             std::string mangled = "$" + class_name + "$" + bare_name;
-            method->func_name = mangled;
+            method->aux_mut().func_name = mangled;
             methods.push_back({bare_name, mangled});
             pending_extra_.push_back(method);
         }
         expect_close(c, "'class " + class_name + "'");
 
         auto ctor = make_stmt(StmtKind::FuncDecl, c);
-        ctor->func_name = class_name;
-        ctor->params = fields;
+        ctor->aux_mut().func_name = class_name;
+        ctor->aux_mut().params = fields;
 
         auto dict_lit = make_expr(ExprKind::DictLiteral, c);
         for (const auto& f : fields) {
@@ -535,14 +569,14 @@ private:
             key->str_val = f;
             auto val = make_expr(ExprKind::Ident, c);
             val->name = f;
-            dict_lit->dict_pairs.push_back({key, val});
+            dict_lit->kids_mut().dict_pairs.push_back({key, val});
         }
         for (const auto& m : methods) {
             auto key = make_expr(ExprKind::String, c);
             key->str_val = m.first;
             auto val = make_expr(ExprKind::Ident, c);
             val->name = m.second;
-            dict_lit->dict_pairs.push_back({key, val});
+            dict_lit->kids_mut().dict_pairs.push_back({key, val});
         }
 
         ExprPtr ret_value = dict_lit;
@@ -551,14 +585,14 @@ private:
             auto base_call = make_expr(ExprKind::Call, c);
             auto base_callee = make_expr(ExprKind::Ident, c);
             base_callee->name = base_name;
-            base_call->callee = base_callee;
-            base_call->args = base_args;
+            base_call->kids_mut().callee = base_callee;
+            base_call->kids_mut().args = base_args;
 
             auto base_assign = make_expr(ExprKind::Assign, c);
             auto base_target = make_expr(ExprKind::Ident, c);
             base_target->name = base_tmp;
-            base_assign->target = base_target;
-            base_assign->value = base_call;
+            base_assign->kids_mut().target = base_target;
+            base_assign->kids_mut().value = base_call;
             auto base_stmt = make_stmt(StmtKind::VarDecl, c);
             base_stmt->expr = base_assign;
             ctor->body.push_back(base_stmt);
@@ -566,10 +600,10 @@ private:
             auto merge_call = make_expr(ExprKind::Call, c);
             auto merge_callee = make_expr(ExprKind::Ident, c);
             merge_callee->name = "dict_merge";
-            merge_call->callee = merge_callee;
+            merge_call->kids_mut().callee = merge_callee;
             auto base_ref = make_expr(ExprKind::Ident, c);
             base_ref->name = base_tmp;
-            merge_call->args = {base_ref, dict_lit};
+            merge_call->kids_mut().args = {base_ref, dict_lit};
             ret_value = merge_call;
         }
 
@@ -600,8 +634,8 @@ private:
         expect_close(t, "'try'");
         auto s = make_stmt(StmtKind::Try, t);
         s->body = std::move(try_body);
-        s->catch_var = catch_var;
-        s->then_body = std::move(catch_body);
+        s->aux_mut().catch_var = catch_var;
+        s->aux_mut().then_body = std::move(catch_body);
         return s;
     }
 
@@ -629,9 +663,9 @@ private:
         expect_close(i, "'if'");
         auto s = make_stmt(StmtKind::If, i);
         s->cond = cond;
-        s->then_body = std::move(then_body);
-        s->elifs = std::move(elifs);
-        s->else_body = std::move(else_body);
+        s->aux_mut().then_body = std::move(then_body);
+        s->aux_mut().elifs = std::move(elifs);
+        s->aux_mut().else_body = std::move(else_body);
         return s;
     }
 
@@ -666,8 +700,8 @@ private:
             auto callee = make_expr(ExprKind::Ident, thru_tok);
             callee->name = "range";
             auto call = make_expr(ExprKind::Call, thru_tok);
-            call->callee = callee;
-            call->args.push_back(bound);
+            call->kids_mut().callee = callee;
+            call->kids_mut().args.push_back(bound);
             iter = call;
         } else {
             iter = parse_expr();
@@ -676,8 +710,8 @@ private:
         auto body = parse_block_body();
         expect_close(f, "'for'");
         auto s = make_stmt(StmtKind::For, f);
-        s->loop_var = lv.text;
-        s->iterable = iter;
+        s->aux_mut().loop_var = lv.text;
+        s->aux_mut().iterable = iter;
         s->body = std::move(body);
         return s;
     }
@@ -703,27 +737,121 @@ private:
             expect(TokenType::SEMI, "';'");
             auto s = make_stmt(StmtKind::VarDecl, start);
             auto ae = make_expr(ExprKind::Assign, eq);
-            ae->target = e;
-            ae->value = value;
+            ae->kids_mut().target = e;
+            ae->kids_mut().value = value;
             s->expr = ae;
             return s;
         }
-        if (check(TokenType::PLUS_EQ) || check(TokenType::MINUS_EQ)) {
+        if (check(TokenType::PLUS_EQ) || check(TokenType::MINUS_EQ) || check(TokenType::STAR_EQ) ||
+            check(TokenType::SLASH_EQ) || check(TokenType::PERCENT_EQ)) {
             Token op = advance();
             ExprPtr value = parse_expr();
             expect(TokenType::SEMI, "';'");
+            if (op.type != TokenType::PLUS_EQ && op.type != TokenType::MINUS_EQ && is_repeatable_target(e)) {
+                const TokenType arith = op.type == TokenType::STAR_EQ ? TokenType::STAR
+                                      : op.type == TokenType::SLASH_EQ ? TokenType::SLASH
+                                      : TokenType::PERCENT;
+                auto bin = make_expr(ExprKind::Binary, op);
+                bin->op = arith;
+                bin->kids_mut().left = clone_repeatable(e);
+                bin->kids_mut().right = value;
+                auto assign = make_expr(ExprKind::Assign, op);
+                assign->kids_mut().target = e;
+                assign->kids_mut().value = seal(bin);
+                auto vs = make_stmt(StmtKind::VarDecl, start);
+                vs->expr = assign;
+                return vs;
+            }
             auto s = make_stmt(StmtKind::ExprStmt, start);
             auto ae = make_expr(ExprKind::CompoundAssign, op);
             ae->op = op.type;
-            ae->target = e;
-            ae->value = value;
+            ae->kids_mut().target = e;
+            ae->kids_mut().value = value;
             s->expr = ae;
             return s;
         }
         expect(TokenType::SEMI, "';'");
         auto s = make_stmt(StmtKind::ExprStmt, start);
-        s->expr = e;
+        s->expr = group_output_items(e);
         return s;
+    }
+
+    static bool is_repeatable_target(const ExprPtr& e) {
+        if (!e) return false;
+        switch (e->kind) {
+            case ExprKind::Ident:
+            case ExprKind::Int:
+            case ExprKind::Float:
+                return true;
+            case ExprKind::Member:
+                return is_repeatable_target(e->kids().object);
+            case ExprKind::Index:
+                return is_repeatable_target(e->kids().object) && is_repeatable_target(e->kids().index);
+            case ExprKind::Binary:
+                return (e->op == TokenType::PLUS || e->op == TokenType::MINUS || e->op == TokenType::STAR) &&
+                       is_repeatable_target(e->kids().left) && is_repeatable_target(e->kids().right);
+            default:
+                return false;
+        }
+    }
+
+    ExprPtr clone_repeatable(const ExprPtr& e) {
+        if (!e) return nullptr;
+        auto c = std::make_shared<Expr>(*e);
+        c->kids_mut().object = clone_repeatable(e->kids_mut().object);
+        c->kids_mut().index = clone_repeatable(e->kids_mut().index);
+        c->kids_mut().left = clone_repeatable(e->kids_mut().left);
+        c->kids_mut().right = clone_repeatable(e->kids_mut().right);
+        return c;
+    }
+
+    bool is_output_sink(const ExprPtr& e) const {
+        if (!e) return false;
+        if (e->kind == ExprKind::Member) return e->name == "out";
+        if (e->kind == ExprKind::Ident) return out_aliases_.count(e->name) > 0;
+        return false;
+    }
+
+    static bool is_item_operator(TokenType t) {
+        return t == TokenType::GT || t == TokenType::LT || t == TokenType::GE || t == TokenType::LE ||
+               t == TokenType::EQ || t == TokenType::NEQ || t == TokenType::AND || t == TokenType::OR;
+    }
+
+    ExprPtr group_output_items(const ExprPtr& e) {
+        std::vector<ExprPtr> spine;
+        ExprPtr cur = e;
+        while (cur && cur->kind == ExprKind::Binary && is_item_operator(cur->op)) {
+            spine.push_back(cur);
+            cur = cur->kids().left;
+        }
+        if (spine.empty() || !is_output_sink(cur) || spine.back()->op != TokenType::GT) return e;
+        bool folds = false;
+        for (const auto& n : spine) if (n->op != TokenType::GT) folds = true;
+        if (!folds) return e;
+        std::vector<ExprPtr> items;
+        std::vector<NodeTok> arrows;
+        for (size_t i = spine.size(); i-- > 0;) {
+            const ExprPtr& n = spine[i];
+            if (n->op == TokenType::GT) {
+                items.push_back(n->kids().right);
+                arrows.push_back(n->tok);
+                continue;
+            }
+            auto f = make_expr(ExprKind::Binary, n->tok);
+            f->op = n->op;
+            f->kids_mut().left = items.back();
+            f->kids_mut().right = n->kids_mut().right;
+            items.back() = seal(f);
+        }
+        ExprPtr result = cur;
+        for (size_t k = 0; k < items.size(); k++) {
+            auto g = make_expr(ExprKind::Binary, arrows[k]);
+            g->op = TokenType::GT;
+            g->kids_mut().left = result;
+            g->kids_mut().right = items[k];
+            result = seal(g);
+        }
+        return result;
     }
 
     std::vector<StmtPtr> parse_block_body() {
@@ -751,8 +879,8 @@ private:
             ExprPtr right = parse_and();
             auto e = make_expr(ExprKind::Binary, op);
             e->op = op.type;
-            e->left = left;
-            e->right = right;
+            e->kids_mut().left = left;
+            e->kids_mut().right = right;
             left = seal(e);
         }
         return left;
@@ -765,8 +893,8 @@ private:
             ExprPtr right = parse_equality();
             auto e = make_expr(ExprKind::Binary, op);
             e->op = op.type;
-            e->left = left;
-            e->right = right;
+            e->kids_mut().left = left;
+            e->kids_mut().right = right;
             left = seal(e);
         }
         return left;
@@ -779,8 +907,8 @@ private:
             ExprPtr right = parse_comparison();
             auto e = make_expr(ExprKind::Binary, op);
             e->op = op.type;
-            e->left = left;
-            e->right = right;
+            e->kids_mut().left = left;
+            e->kids_mut().right = right;
             left = seal(e);
         }
         return left;
@@ -793,8 +921,8 @@ private:
             ExprPtr right = parse_additive();
             auto e = make_expr(ExprKind::Binary, op);
             e->op = op.type;
-            e->left = left;
-            e->right = right;
+            e->kids_mut().left = left;
+            e->kids_mut().right = right;
             left = seal(e);
         }
         return left;
@@ -807,8 +935,8 @@ private:
             ExprPtr right = parse_multiplicative();
             auto e = make_expr(ExprKind::Binary, op);
             e->op = op.type;
-            e->left = left;
-            e->right = right;
+            e->kids_mut().left = left;
+            e->kids_mut().right = right;
             left = seal(e);
         }
         return left;
@@ -821,8 +949,8 @@ private:
             ExprPtr right = parse_unary();
             auto e = make_expr(ExprKind::Binary, op);
             e->op = op.type;
-            e->left = left;
-            e->right = right;
+            e->kids_mut().left = left;
+            e->kids_mut().right = right;
             left = seal(e);
         }
         return left;
@@ -835,7 +963,7 @@ private:
             ExprPtr operand = parse_unary();
             auto e = make_expr(ExprKind::Unary, op);
             e->op = op.type;
-            e->operand = operand;
+            e->kids_mut().operand = operand;
             return seal(e);
         }
         return parse_postfix();
@@ -858,8 +986,8 @@ private:
                 }
                 expect(TokenType::RPAREN, "')'");
                 auto ce = make_expr(ExprKind::Call, lp);
-                ce->callee = e;
-                ce->args = std::move(args);
+                ce->kids_mut().callee = e;
+                ce->kids_mut().args = std::move(args);
                 e = seal(ce);
             } else if (check(TokenType::DCOLON) || check(TokenType::DOT)) {
                 bool legacy_dot = check(TokenType::DOT);
@@ -888,7 +1016,7 @@ private:
                 }
                 Token name = advance();
                 auto me = make_expr(ExprKind::Member, name);
-                me->object = e;
+                me->kids_mut().object = e;
                 me->name = name.text;
                 e = seal(me);
             } else if (check(TokenType::LBRACKET)) {
@@ -896,8 +1024,8 @@ private:
                 ExprPtr idx = parse_expr();
                 expect(TokenType::RBRACKET, "']'");
                 auto ie = make_expr(ExprKind::Index, bracket);
-                ie->object = e;
-                ie->index = idx;
+                ie->kids_mut().object = e;
+                ie->kids_mut().index = idx;
                 e = seal(ie);
             } else {
                 break;
@@ -916,7 +1044,6 @@ private:
                 catch (...) {
                     error(t, "integer literal '" + (t.text.size() > 40 ? t.text.substr(0, 40) + "..." : t.text) +
                              "' does not fit in a 64-bit int (range -9223372036854775807..9223372036854775807)");
-                    diags_.note("write it as a float (e.g. 1e19) if an approximate value is acceptable");
                 }
                 return e;
             }
@@ -978,7 +1105,7 @@ private:
                 }
                 expect(TokenType::RBRACKET, "']'");
                 auto e = make_expr(ExprKind::VectorLiteral, t);
-                e->elements = std::move(elements);
+                e->kids_mut().elements = std::move(elements);
                 return e;
             }
             case TokenType::LBRACE: {
@@ -998,7 +1125,7 @@ private:
                 }
                 expect(TokenType::RBRACE, "'}'");
                 auto e = make_expr(ExprKind::DictLiteral, t);
-                e->dict_pairs = std::move(pairs);
+                e->kids_mut().dict_pairs = std::move(pairs);
                 return e;
             }
             default:

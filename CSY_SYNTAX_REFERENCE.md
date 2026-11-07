@@ -26,8 +26,109 @@ CSy is an AI-focused compiled language designed for AI development with concise,
 # Import a module and alias it
 #inc basic as bc;
 #inc ai as ai;
+#inc path as path;
+#inc fs as fs;
 #inc nvidia as nv;  # deprecated, use #inc ai as ai
 ```
+
+The `path` and `fs` modules provide opt-in general-purpose path and filesystem functions.
+They do not add names to `basic`, and existing `bc::...` calls remain available.
+
+```csy
+#inc path as path;
+#inc fs as fs;
+
+config = path::join("settings", "app.json");
+path::basename(config);
+path::dirname(config);
+path::extension(config);
+path::normalize("data/../data/input.csv");
+path::is_absolute("/var/tmp");
+
+fs::exists(config);
+fs::is_file(config);
+fs::is_dir("data");
+fs::list_dir("data");
+```
+
+- `path::join` joins two or more path strings. An absolute later path replaces the preceding path.
+- `path::basename`, `dirname` and `extension` return the final component, parent component and
+  extension. A filename such as `.env` has no extension.
+- `path::normalize` performs lexical normalization only; it does not access the filesystem or
+  resolve symbolic links.
+- `fs::exists`, `fs::is_file` and `fs::is_dir` query the filesystem. Missing paths return `false`;
+  inspection errors are reported.
+- `fs::list_dir` returns entry names in sorted order and reports errors. `fs::create_dir` and
+  `fs::remove_file` are also available; they return `true` on success and `false` on failure, and
+  `remove_file` refuses directories.
+- `fs::read_file`, `write_file`, `append_file` and `read_lines` are available as well. They retain
+  the same return and error behavior as the corresponding `bc::` functions.
+- The filesystem functions are Linux-host filesystem operations and use paths relative to the
+  process working directory when given relative paths.
+
+## Linux Process and Bash
+
+External commands are available through separate opt-in modules:
+
+```csy
+#inc process as proc;
+#inc shell as sh;
+
+result = proc::run("printf", ["hello"]);
+script_result = sh::run("printf 'hello from Bash'");
+exit_status = sh::interactive();
+```
+
+- `process::run(program, arguments, options?)` executes a program directly with an argument
+  vector; it does not parse arguments as shell syntax.
+- `shell::run(script, options?)` runs a non-interactive Bash script using
+  `/bin/bash --noprofile --norc -c`. Use it when shell syntax such as pipes or redirection is
+  needed.
+- `shell::interactive()` starts an interactive Bash session and returns its exit status. It
+  requires an interactive terminal.
+- The optional dictionary supports `cwd` (working directory), `env` (string-to-string environment
+  overrides), `timeout_ms` (0 means no timeout; the maximum is 604800000), and `stream` (also
+  write captured output to the current terminal). Unknown options and invalid values are errors.
+- `process::run` and `shell::run` return a dictionary with `stdout`, `stderr`, `status`, and
+  `timed_out`. Captured output is limited to 64 MiB total. A timeout reports status 124.
+
+The compiler asks for approval for each new external-command call site. Option 1 approves that
+call site, option 2 denies it, and option 3 trusts the project directory. Approvals are stored in
+the current user's configuration directory (`$XDG_CONFIG_HOME/csyc/command-trust`, or
+`~/.config/csyc/command-trust`); they are not stored in the project or its `.csp` file. A compiled
+object run without a matching local approval asks again. Commands recognized as `sudo`, `doas`, `pkexec`,
+`run0` or `su` also require two runtime confirmations before execution, including when they are started
+through a wrapper such as `env`, `nice`, `timeout` or `xargs`, or named inside the text given to a shell
+or an interpreter.
+
+For example, this uses `sudo` to run a harmless command:
+
+```csy
+#inc process as proc;
+
+result = proc::run("sudo", ["/usr/bin/printf", "hello\n"]);
+```
+
+During compilation, choose `1` to approve this call site, `2` to deny it, or `3` to trust the
+project directory:
+
+```text
+warning: main.csy:3: external command call requires approval
+  1. I know what I'm doing.
+  2. NO!
+  3. I know what I'm doing. DON'T warn me again in THIS project directory
+Choose 1, 2, or 3:
+```
+
+Choosing `2` stops compilation with an approval-denied error and does not produce the requested
+`.cso` output. This approval is for the call site; it does not inspect the command to determine
+whether it is harmless. At runtime, a recognized `sudo`, `doas`, `pkexec`, `run0` or `su` call asks twice for `y` or
+`yes`; declining either prompt cancels the command. Confirming allows it to run with whatever
+privileges the operating system grants, so these prompts do not make destructive commands safe.
+
+Privilege checks for commands inside Bash are best-effort, not a security boundary: they only
+recognize some forms, and interactive shell wrappers can be bypassed. Do not rely on them to
+prevent a command from obtaining elevated privileges.
 
 ## Using/Aliasing
 
@@ -90,6 +191,13 @@ nums = [1, 2, 3, 4, 5];
 person = {"name": "Alice", "age": 30};
 ```
 
+A variable has to be given a value before it is read. Reading a name at the top level before its
+first assignment is a compile error (`x = x + 1;` with no earlier `x`); inside a loop it is a warning,
+because an earlier round of the loop may have set it. The left side of `=` must be a variable, an
+element (`v[0] = 1;`) or a field (`me::x = 1;`). A literal (`true = 5;`), a module name (`bc = 1;`
+when `bc` is an `#inc` alias) and a name that lives in a module or `#connect` (`bc::len = 5;`) cannot
+be assigned to, and a module name is not a value (`x = bc;` is an error; write `bc::len`).
+
 ## Data Types
 
 ### Primitive Types
@@ -134,6 +242,8 @@ func fib(n):
 - Return value with `rt value;`
 - Parameters are implicitly typed
 - Functions can be recursive
+- A call needs exactly as many arguments as the function has parameters. A call the compiler can
+  see is a compile error; a call through a function value is a runtime error
 
 ## Return Statement
 
@@ -190,6 +300,11 @@ for x in items:
     bc::out>x;
 ::ext
 ```
+
+`for x in value` walks a vector, an f64_array or an i64_array element by element, a string
+character by character, and a dict key by key (in insertion order, over a snapshot of the keys, so
+removing entries inside the loop is safe). Any other value (an int, a float, `none`) is a runtime
+error, and `thru` needs a number.
 
 ### While Loop
 
@@ -293,7 +408,7 @@ model::initialize();
 
 ### Inheritance (extends)
 
-A class can extend another class. Write the base class and the arguments it should
+A class can extend another class (never itself, directly or through its base classes). Write the base class and the arguments it should
 receive after `extends`:
 
 ```csy
@@ -343,6 +458,15 @@ bc::out>person["name"];
 rt me::name;  # Equivalent to me["name"]
 ```
 
+A dict keeps the order in which its keys were first added. Printing, `bc::keys`, `bc::values`,
+`bc::items`, `bc::dict_merge` and JSON output all follow that order. Assigning an existing key keeps
+its position; removing a key and adding it again puts it at the end.
+
+```csy
+bc::items(tally);              # [["rested", 0], ["tired", 0]]: a vector of [key, value] pairs
+bc::remove(tally, "tired");    # removes the key and returns its value (error if the key is missing)
+```
+
 ## Vector Operations
 
 ```csy
@@ -364,6 +488,21 @@ bc::out>bc::len(items);
 
 # Add element
 bc::push(items, 100);
+
+# Take out and insert (these change the vector in place)
+last = bc::pop(items);           # removes and returns the last element (error if empty)
+first = bc::pop(items, 0);       # removes and returns the element at an index
+bc::insert(items, 1, 42);        # inserts before an index; the index may equal the length
+gone = bc::remove(items, 0);     # removes and returns the element at an index
+bc::index_of(items, 42);         # first index of a value, or -1; compares by contents
+bc::any([0, 3]);                 # true if any element is truthy
+bc::all([1, 0]);                 # true if every element is truthy
+bc::zip([1, 2, 3], ["a", "b"]);  # [[1, "a"], [2, "b"]]: stops at the shorter vector
+bc::unique([3, 1, 3, 2, 1]);     # [3, 1, 2]: keeps the first of each value, in order
+bc::sort_by(words, bc::len);     # a new vector ordered by a key function (stable); keys must be all numbers or all strings
+```
+
+A negative index counts from the end for `pop`, `insert` and `remove`.
 
 # Iteration
 for x in items:
@@ -391,10 +530,10 @@ picked = bc::shuffle(bc::range(5)); # the same numbers in random order
 counts from the end. A range that falls outside the collection is an error, not a clamp. Strings
 are not sliced with `bc::slice`; use `bc::substr`.
 
-Assigning a vector, dict or f64_array does not copy it. After `b = a`, both names refer to the same
-data, so `b[0] = 5` also changes `a`. `bc::copy(x)` builds an independent copy, and it copies nested
-vectors and dicts too. `bc::slice` copies only the top level, so the rows of a nested vector are
-still shared with the original.
+Assigning a vector, dict, f64_array or i64_array does not copy it. After `b = a`, both names refer
+to the same data, so `b[0] = 5` also changes `a`. `bc::copy(x)` builds an independent copy of
+vectors and dicts, and it copies nested vectors and dicts too. `bc::slice` copies only the top level,
+so the rows of a nested vector are still shared with the original.
 
 ## String Operations
 
@@ -418,7 +557,37 @@ bc::out>bc::replace(s, "World", "CSy");  # Replace
 bc::out>bc::trim("  padded  ");  # Trim whitespace
 bc::out>bc::repeat("ab", 3);  # Repeat string
 bc::out>bc::split("a,b,c,d", ",");  # Split into vector
+bc::starts_with(s, "Hel");     # true or false
+bc::ends_with(s, "ld");
+bc::lines(text);               # split at line breaks; a trailing newline adds no empty line, "\r\n" is handled
+bc::pad_left("7", 3, "0");     # "007" (the fill is one character and defaults to a space)
+bc::pad_right("ab", 5);        # "ab   "
+bc::chars("aé€");              # ["a", "é", "€"]: one string per UTF-8 character
+bc::ord("€");                  # 8364: the code point of the first character
+bc::chr(8364);                 # "€"
 ```
+
+Strings hold Unicode text and every position counts characters, not bytes: `bc::len("日本語")` is `3`,
+`"日本語"[1]` is `"本"`, a negative index counts from the end, `bc::substr`, `bc::find`, `bc::reverse`,
+`bc::split(s, "")`, `bc::chars`, `bc::pad_left`, `bc::pad_right` and `for c in s` all work on characters.
+Bytes that are not valid UTF-8 count as one character each. String literals understand `\n`, `\t`,
+`\\`, `\"`, `\0`, `\xHH` (one byte), `\uHHHH` and `\UHHHHHHHH` (a character); a malformed `\x`, `\u`
+or `\U` escape is an error.
+
+### Formatting with bc::format
+
+```csy
+bc::format("{} + {} = {}", 1, 2, 3);          # "1 + 2 = 3"
+bc::format("pi is {:.3}", 3.14159);           # "pi is 3.142": digits after the point
+bc::format("[{:>6}] [{:<6}]", 42, "ab");      # "[    42] [ab    ]": width with alignment
+bc::format("{{braces}} {}", "ok");            # "{braces} ok": write {{ and }} for a literal brace
+```
+
+Placeholders are filled in order. A placeholder is `{}` or `{:` followed by an optional alignment
+(`<` or `>`), an optional width, and an optional `.` with a number of digits. Numbers align right and
+other values align left unless you say otherwise. Too few or too many values is an error.
+Floats printed without an explicit precision use the shortest decimal representation that round-trips
+to the same value.
 
 ## Math Operations
 
@@ -430,11 +599,18 @@ z = 10 * 5;   # Multiplication
 w = 10 / 5;   # Division
 i += 1;       # Increment
 i -= 1;       # Decrement
+i *= 2;       # Multiply in place
+i /= 2;       # Divide in place
+i %= 5;       # Modulo in place
 ```
 
-- `%` is modulo. `/` between two integers is integer division and truncates toward zero (`10 / 4` is `2`, `-7 / 2` is `-3`); use a float on either side for a fractional result (`10.0 / 4` is `2.5`).
-- Only `+=` and `-=` exist as compound assignment. `*=`, `/=` and `%=` are not supported; write `x = x * 2;`.
+- `%` is modulo. It works on integers and on floats (`7.5 % 2.0` is `1.5`); the result takes the sign of the left operand (`-7 % 3` is `-1`). Modulo by zero is a runtime error. `/` between two integers is integer division and truncates toward zero (`10 / 4` is `2`, `-7 / 2` is `-3`); use a float on either side for a fractional result (`10.0 / 4` is `2.5`).
+- Compound assignment exists for `+=`, `-=`, `*=`, `/=` and `%=`. The target is read and written once, so `v[next()] *= 2;` calls `next()` one time.
 - Integer arithmetic that overflows 64 bits stops with a runtime error instead of wrapping.
+- `+ - * / %` need two numbers. `+` also joins two strings and joins or adds vectors, and an int mixed with
+  a float is a float. Anything else (`none + 1`, `1.5 + none`, `1 + "a"`, `"a" * 3`, `-"a"`) is a runtime error
+  that names both types. Join text and numbers with `bc::str`.
+- Comparing an int with a float is exact: `9007199254740993 == 9007199254740992.0` is `false`.
 
 ### Comparison Operators
 ```csy
@@ -445,6 +621,10 @@ x != 5;  # Not equal
 x >= 5;  # Greater or equal
 x <= 5;  # Less or equal
 ```
+
+`<`, `>`, `<=` and `>=` compare two numbers or two strings. Any other pair (a string and an int, `none`,
+a vector, a boolean) is a runtime error, so `1 < 2 < 3` stops with an error instead of giving a wrong answer.
+`==` and `!=` accept any two values and answer `false` / `true` when the types differ.
 
 ### Logical Operators
 ```csy
@@ -462,7 +642,9 @@ bc::cos(0);         # Cosine
 bc::log(bc::E());   # Natural log
 bc::floor(3.7);     # Floor
 bc::ceil(3.2);      # Ceiling
-bc::round(3.5);     # Round
+bc::round(3.5);     # Round to a whole number (halves round away from zero)
+bc::round(3.14159, 2);  # Round to 2 digits after the point: 3.14
+bc::round(1234.5, -2);  # A negative count rounds to tens, hundreds, ...: 1200
 bc::abs(-42);       # Absolute value
 bc::max(10, 20, 15);  # Maximum of any number of arguments (a NaN is ignored unless all are NaN)
 bc::min(10, 20);    # Minimum
@@ -487,13 +669,14 @@ o>value;        # Same if using bc::out as o
 
 ### Input
 ```csy
-input = bc::input("prompt> ");  # Read line from stdin
+input = bc::input("prompt> ");  # Read line from stdin, none at end of input
 ```
 
 ### Type Conversion
 ```csy
 bc::str(42);          # Convert to string
-bc::int("123");       # Convert to integer
+bc::int("123");       # Convert to integer; surrounding spaces and a sign are allowed
+bc::float("3.5e2");   # Convert to float
 bc::typeof(42);       # Get type as string
 ```
 
@@ -540,11 +723,62 @@ bc::exit(1);   # Exit with error code
 
 ### Command-line Arguments
 ```csy
-arguments = bc::args();  # Get command-line arguments as vector
+#inc basic as bc;
+
+arguments = bc::args();
+for argument in arguments:
+    bc::out>argument;
+::ext
 ```
 
-Program arguments go after a `--`: `csyc script.csy -- first second` makes `bc::args()` return
-`["first", "second"]`. Without the `--`, `csyc` treats the extra words as input files.
+`bc::args()` returns every program argument as a string, in order. With a source file, put
+arguments after `--` so `csyc` does not interpret them as compiler options or project files:
+
+```sh
+csyc script.csy -- input.txt --verbose
+```
+
+The program receives `["input.txt", "--verbose"]`; the separator itself is not included. The same
+separator works when running a compiled object:
+
+```sh
+csyc run program.cso -- input.txt --verbose
+```
+
+For a standalone executable built with `csyc build script.csy --exe -o program`, pass arguments
+after the executable name:
+
+```sh
+./program input.txt --verbose
+```
+
+### Experimental native-only executable
+
+On Linux x86-64, a deliberately small subset can be compiled to a native executable:
+
+```csy
+func main():
+    rt 6 * 7;
+::ext
+```
+
+```sh
+csyc build main.csy --native-exe -o program
+./program
+echo $?
+```
+
+The only currently supported source is one zero-argument `main` function whose sole statement
+returns an integer expression formed from integer literals, unary minus, and `+`, `-`, or `*`.
+The process exit status is the low 8 bits of the returned value. Other CSy features are rejected;
+this mode never falls back to bytecode or the VM. The build uses the host C compiler (`CC`, or
+`cc` when unset), but the resulting executable does not need `csyc` or a CSy runtime to run.
+This prototype requires `--native-exe` together with `build` and `-o`, and cannot be combined
+with `--exe`, `--no-native`, or program arguments.
+
+CSy returns the arguments unchanged. It does not automatically interpret flags, convert values,
+or validate required arguments. Without `--`, extra words passed to `csyc` are treated as compiler
+inputs/options, not program arguments.
 
 ## Tensor Operations
 
@@ -666,6 +900,33 @@ picks = bc::argmax(probs, 3);     # vector with one class index per row
 Without `cols`, `bc::softmax` treats the whole array as a single row. `cols` must be a positive
 integer that divides the length of the array.
 
+## Packed Int64 Arrays
+
+Use `bc::i64_array(length[, initial_value])` for a fixed-size, mutable array of signed 64-bit
+integers. The initial value defaults to zero. Indexing accepts negative indices, and values remain
+exact across the full signed 64-bit range.
+
+```csy
+values = bc::i64_array(3);
+values[0] = 9007199254740993;
+values[1] = 4;
+values[2] = 5;
+
+func sum_values(items):
+    total = 0;
+    for i in thru bc::len(items):
+        total += items[i];
+    ::ext
+    rt total;
+::ext
+
+bc::out>sum_values(values);
+```
+
+Native numeric functions can read, write and update an `i64_array` parameter. Like `f64_array`,
+it has a fixed size, so `bc::push` cannot grow it. Assignment shares the same array, so changing
+one variable changes the other.
+
 ## Datasets and JSON
 
 CSy can read and write AI datasets as JSON, JSONL, Parquet, CSV, `.bin` tensors and plain
@@ -734,8 +995,10 @@ become doubles. Files are written uncompressed, one row group per 1048576 rows.
 
 What it reads: flat tables, UNCOMPRESSED, SNAPPY, GZIP and ZSTD, PLAIN, dictionary,
 RLE and BYTE_STREAM_SPLIT encodings, data page versions 1 and 2. Dates, timestamps and
-decimals come back as their raw numbers. Not supported, with a clear error: nested or
-repeated columns (unless you select only the flat ones), LZ4 and Brotli,
+decimals come back as their raw numbers. Struct fields come back as columns named by their path
+(`person.age`, null where the struct or the field is null). A list column comes back as one vector
+per row: `none` for a null list, an empty vector for an empty list, and `none` for a null element.
+Not supported, with a clear error: lists inside lists, LZ4 and Brotli,
 DELTA encodings, INT96 and fixed length byte columns, and encrypted files.
 
 A file that uses an unsupported codec or encoding can be rewritten once with a supported one, for
@@ -1442,7 +1705,9 @@ output = "build/app.cso"     # optional; without it the .cso is written next to 
   belong in `sources`. A file listed in `sources` only has its top-level code run
   before the entry file; its names are still not visible without `#connect`.
 - `csyc build file.csy -o out.cso` builds one file without a project file, and
-  `csyc build project.csp -o out.cso` overrides `output`.
+  `csyc build project.csp -o out.cso` overrides `output`. The output may not be a source file of the
+  build, may not end in `.csy`, and may only replace a missing, empty or earlier build output (a CSy object or an
+  executable); a device, a folder or an unrelated file is refused.
 - A `.cso` is the result, never an input: `#connect` cannot point at one.
 
 ### Connecting files
@@ -1486,7 +1751,7 @@ output = "build/app.cso"     # optional; without it the .cso is written next to 
 | `cannot read source file ... (named by #connect "x.csy")` | wrong path | paths are relative to the file with the `#connect` |
 | `... is already the name of ...` | a namespace reuses an `#inc` alias | choose another name with `as` |
 
-A call with the wrong number of arguments through a namespace is a warning:
+A call with the wrong number of arguments through a namespace is an error:
 `'math::double' takes 1 argument(s), but this call passes 3`.
 
 ### Your own names for directives
@@ -1557,17 +1822,17 @@ x = 5;
 o>"x=">x>", half=">(x / 2.0);   # prints: x=5, half=2.5
 ```
 
-**Comparisons and logic must be wrapped in parentheses when printed.** `>` is also the
-comparison operator, so the compiler reads `o>x == 5;` as something other than
-"print the result" and it prints nothing, and `o>x > 4;` prints `x` and then `4`.
-Arithmetic (`+ - * / %`) is safe without parentheses.
+**Comparisons and logic can follow `>` directly.** `==`, `!=`, `<`, `<=`, `>=`, `&&` and `||`
+belong to the value being printed:
 
 ```csy
-o>(x == 5);                 # prints true
-o>((x > 3) && (x < 9));     # wrap the whole expression
-r = x > 3;                  # or store it first
-o>r;
+o>x == 5;                   # prints true
+o>(x > 3) && (y < 9);       # wrap a comparison that uses > so it is not read as a separator
+o>"ok=">x == 5;             # prints ok=true
 ```
+
+A bare `>` always starts the next item of the chain, so a greater-than comparison needs parentheses
+(`o>(x > 4);`). Arithmetic (`+ - * / %`) is safe without parentheses.
 
 ### Function Return
 
@@ -1662,6 +1927,9 @@ csyc run app.cso
 # Verbose build
 csyc build --verbose
 
+# Write the build log to a file
+csyc build --log build.log
+
 # Set memory limit
 csyc build --memory-limit 1024
 
@@ -1730,26 +1998,33 @@ csyc wipe --ccm-mem      # forget everything it remembers
 
 Behaviors that are easy to trip over. They are listed so you can work around them.
 
-- Printing a comparison or logical expression needs parentheses (see Print Output).
-- `bc::round(x, 2)` ignores the second argument and rounds to a whole number.
+- A greater-than comparison needs parentheses when printed (see Print Output); the other
+  comparisons and `&&` / `||` do not.
 - `bc::min` and `bc::max` accept any number of numbers, or a single vector or f64_array.
-- `bc::int("abc")` returns `0` instead of an error. `bc::read_file` on a missing file
-  returns `none`. `bc::sqrt(-1)` gives `nan`.
-- Strings are bytes: `bc::len("héllo")` is `6`, and `bc::upper` / `bc::lower` only change
-  ASCII letters.
-- Dictionaries have no guaranteed order. Printing, `bc::keys` and `bc::dict_merge` may
-  list keys in different orders.
-- Runtime errors show line `0:0` in the header; the real line is in the message
-  (`at top level, line 5`).
-- `==` and `!=` on two vectors, dicts or f64_arrays compare identity, not contents:
-  `[1, 2] == [1, 2]` is `false`, while `a == a` is `true`. Strings do compare by content. To compare
-  two vectors, loop over the elements (the training program's `count_correct` does this).
+- `bc::read_file` and `bc::read_lines` on a missing file return `none`. `bc::sqrt(-1)` gives `nan`.
+- `bc::upper` / `bc::lower` only change ASCII letters.
+- `bc::sum`, `bc::mean`, `bc::dot` and the other numeric builtins stop with an error on a value that is not a
+  number. Builtins that take a count or a size (`bc::zeros`, `bc::ones`, `bc::eye`, `bc::seed`, `bc::randint`)
+  need a whole number, and `bc::zeros`, `bc::ones` and `bc::eye` reject negative sizes. `bc::repeat` rejects a
+  negative count, `bc::substr` a negative start or length, `bc::argmax` an empty vector, and `bc::shape` a ragged
+  vector of vectors. `bc::randint` needs the lower bound first. `bc::sum` of ints is exact and stops with an
+  error on overflow. `bc::float("1e999")` is an error, while `bc::float("inf")` gives `inf`.
+- A parameter or class field that is declared twice is a compile error. Code after a top-level `rt` gets the
+  unreachable code warning.
+- `csyc build -o PATH` needs the folder of PATH to exist.
+- `bc::mean` of an empty vector or f64_array is an error, `bc::min` and `bc::max` return `nan` when any value is `nan`,
+  `bc::read_file` on a directory is an error, and `bc::exit` needs an integer.
+- `==` and `!=` compare vectors, dicts and f64_arrays by contents, to any depth. A vector that
+  contains itself cannot be compared and raises an error.
 - Assigning a vector, dict or f64_array does not copy it. `b = a` followed by `b[0] = 5` also changes
   `a`. Use `bc::copy(a)` for an independent copy.
 - A NaN is never equal to anything, itself included. Test for it with `bc::isnan(x)`, or `x != x`.
 - A function that has its own parameter, loop variable or variable named like a math builtin (a
   parameter called `exp`, say) keeps `bc::exp(x)` calls interpreted, because native code could not tell
   the two apart. Rename the variable to keep the function native.
+- A runtime error inside a natively compiled function that writes to an f64_array or i64_array
+  reports the line of the call instead of the line that failed. Set `CSY_NO_NATIVE_JIT=1` to get
+  the exact line.
 - `bc::push` needs a vector. An f64_array has a fixed size, so pushing onto one is an error.
 - Status lines such as `[csy] running ...` go to stderr, so redirecting stdout captures only
   what your program prints.
@@ -1929,6 +2204,10 @@ sorted = bc::sort(vec);      # Sort numbers or strings
 
 # Dict merge
 merged = bc::dict_merge(dict1, dict2);  # Merge dicts, second overrides first
+
+# Environment and standard input
+home = bc::getenv("HOME");   # the value, or none if the variable is not set
+text = bc::read_stdin();     # everything left on standard input as one string
 ```
 
 ## Additional File Operations
@@ -1936,6 +2215,12 @@ merged = bc::dict_merge(dict1, dict2);  # Merge dicts, second overrides first
 ```csy
 # Append to file
 bc::append_file(path, content);  # Append content to file
+
+bc::read_lines(path);     # the lines of a file as a vector of strings, or none if it cannot be read
+bc::list_dir(path);       # names in a directory, sorted; an error if it cannot be read
+bc::is_dir(path);         # true if the path is a directory
+bc::make_dir(path);       # creates the directory and any missing parents; true on success
+bc::remove_file(path);    # removes a file; false if it was not there; an error for a directory
 ```
 
 ## Time Functions
@@ -2095,10 +2380,12 @@ The lexer recognizes:
 ```bash
 # Build options
 csyc build --verbose                    # Detailed build log
+csyc build --log build.log             # Also write every stage, diagnostic and timing to a file
 csyc build --memory-limit 1024         # Set memory budget in MiB
 csyc build --threads 4                 # Set worker thread count
 csyc build --no-native                 # Disable native compilation
 csyc build --exe                       # Create standalone executable
+csyc build main.csy --native-exe -o app # Experimental strict native-only executable
 csyc build -o output.cso               # Specify output file
 
 # Environment variables
@@ -2113,6 +2400,40 @@ CSY_NO_AUTO_CUDA=1                    # Disable auto CUDA setup
 CSY_ALLOW_CWD_LIBS=1                   # Allow libraries from current directory
 ```
 
+## Reading Compiler Messages
+
+Every error and warning has the same layout:
+
+```
+  main.csy:4:5  error
+  ----------------------------------------
+  'x' is being read before it has a value, that can't work
+
+  3 | y = 5;
+  4 | x = x + 1;
+    |     ^
+  5 | say>x;
+
+  fix: give 'x' a value on an earlier line, like x = 0;
+```
+
+- The first line gives the file, line, column and kind. The dashed line and the one-line message
+  follow it.
+- The excerpt shows the line before and after, and underlines the exact word with `^~~~`.
+- `fix:` suggests what to change. `hint:` adds extra clues such as a close spelling.
+- A runtime error that happens inside functions ends with `how it got here, newest first:` and
+  lists each caller with its line number.
+- Errors from built-in functions, file loading, data formats and external commands use the same
+  layout and also get a `fix:` line.
+- The last line counts the errors and warnings. At most 100 errors and 200 warnings are printed.
+
+`csyc build --log build.log` writes a plain text record of the build to a file: each stage with the
+time since the build began, the memory in use and the peak, every error and warning with its fix and
+call chain, and whether the program ran and how it ended. The file is written line by line, so a
+build that stops early or crashes still leaves everything up to that point. When a build fails, the
+last thing printed is the path of the log. The log file may not end in `.csy` and cannot replace
+anything that is not a regular file.
+
 ## Error Handling
 
 ```csy
@@ -2122,6 +2443,9 @@ bc::raise("error message");
 # Runtime errors include location
 # Example: "vector index 9 out of bounds (size 3) (in function 'f', line 4)"
 ```
+
+The error header shows the file, line and column where the failure happened, with the source line
+and a caret, including for errors inside functions of connected files.
 
 ### try and catch
 
@@ -2191,14 +2515,25 @@ The compiler enforces safety limits:
 ## Native JIT Eligibility
 
 Functions are eligible for native JIT compilation if they:
-- Use only numeric operations (int, float, f64_array)
-- Call only whitelisted builtins, as `sqrt(x)` or `bc::sqrt(x)` (see below)
+- Use numeric operations over integers, floats, `f64_array` or `i64_array`
+- Call whitelisted builtins, as `sqrt(x)` or `bc::sqrt(x)` (see below), and supported numeric
+  conversions such as `bc::int`
 - Don't read/write module variables
-- Don't call `bc::len(x)` or other non-whitelisted builtins; pass lengths in as numbers
-- Don't use strings, vectors, or dicts
 - Have a compatible signature
 
 Use `--explain-native` to see why functions stay interpreted.
+
+An otherwise-native function can also call the interpreter for an isolated `bc::len(parameter)`
+expression when that parameter is not indexed as a numeric array. This lets a numeric function use
+the length of a string, vector or dict without moving its other supported work out of native code.
+The original parameter and its object identity are preserved. This is a narrow fallback, not
+general native support for string, vector or dict operations; other unsupported expressions keep
+the function interpreted.
+
+Functions that index an ordinary vector parameter may be specialized for native execution when the
+argument is provably a non-empty homogeneous vector of integers or floats. The values are copied
+into a temporary packed buffer and copied back after native mutations. Mixed or empty vectors and
+repeated aliases are left interpreted.
 
 ### The rules that decide speed
 
@@ -2214,11 +2549,16 @@ Use `--explain-native` to see why functions stay interpreted.
 - **The whitelist** is: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sqrt`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `abs`, `sign`, `tanh`, `sigmoid`, `relu`, `sigmoid_deriv`, `relu_deriv`, `tanh_deriv`, `atan2`, `pow`, `clamp`, `max`, `min`, `isnan`, `isinf`. `max` and `min` stay native only with exactly two
   numeric arguments; with more arguments or an array they run in the interpreter, which gives the
   same answer more slowly.
-- **A comparison, `isnan` or `isinf` result can only be an `if` or `while` condition.** Storing or
-  returning it keeps the function interpreted. Count with `if isnan(x): c += 1;` rather than
-  `c += isnan(x);`.
-- **Vectors, strings, dicts and `push` are not native.** Pass arrays and numbers in, and keep the
-  list handling outside the hot function.
+- **A function may return `true`, `false` or a comparison**, and `while true:` loops work, so
+  predicates such as `is_prime(n)` are native. A call to such a function can only be an `if` or
+  `while` condition. A comparison, `isnan` or `isinf` result, or a call to a boolean function,
+  cannot be stored in a variable or used as a number; that keeps the function interpreted. Count with
+  `if isnan(x): c += 1;` rather than `c += isnan(x);`. A function must return booleans on every
+  path or numbers on every path, not a mix.
+- **Float `%` stays interpreted.** Integer `%` is native.
+- **General string, vector and dict operations remain interpreted.** The `len` fallback above and
+  proven homogeneous-vector specialization are limited exceptions. Keep other collection handling
+  outside hot functions.
 
 ## GPU Module (NVIDIA)
 

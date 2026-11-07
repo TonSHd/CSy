@@ -256,7 +256,7 @@ private:
 
     Value object(int depth) {
         p_++;
-        std::unordered_map<std::string, Value> members;
+        DictMap members;
         skip_ws();
         if (p_ < end_ && *p_ == '}') { p_++; return Value::make_dict(std::move(members)); }
         for (;;) {
@@ -354,6 +354,17 @@ void write(std::string& out, const Value& v, bool pretty, int level) {
             out.push_back(']');
             return;
         }
+        case Value::I64Array: {
+            const auto& a = *v.i64_array_val;
+            if (a.empty()) { out += "[]"; return; }
+            out.push_back('[');
+            for (size_t i = 0; i < a.size(); i++) {
+                if (i) out += pretty ? ", " : ",";
+                out += std::to_string(a[i]);
+            }
+            out.push_back(']');
+            return;
+        }
         case Value::Vec: {
             const auto& items = *v.vec_val;
             if (items.empty()) { out += "[]"; return; }
@@ -370,20 +381,15 @@ void write(std::string& out, const Value& v, bool pretty, int level) {
         case Value::Dict: {
             const auto& m = *v.dict_val;
             if (m.empty()) { out += "{}"; return; }
-            std::vector<const std::pair<const std::string, Value>*> entries;
-            entries.reserve(m.size());
-            for (const auto& kv : m) entries.push_back(&kv);
-            std::sort(entries.begin(), entries.end(),
-                      [](const auto* a, const auto* b) { return a->first < b->first; });
             out.push_back('{');
             bool first = true;
-            for (const auto* kv : entries) {
+            for (const auto& kv : m) {
                 if (!first) out.push_back(',');
                 first = false;
                 if (pretty) newline(out, level + 1);
-                put_string(out, kv->first);
+                put_string(out, kv.first);
                 out += pretty ? ": " : ":";
-                write(out, kv->second, pretty, level + 1);
+                write(out, kv.second, pretty, level + 1);
             }
             if (pretty) newline(out, level);
             out.push_back('}');
@@ -414,4 +420,3 @@ std::string stringify(const Value& value, bool pretty) {
 
 }
 }
-

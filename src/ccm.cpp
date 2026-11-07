@@ -925,6 +925,30 @@ bool conf_value(const fs::path& conf, bool& present) {
     return raw.compare(i, 4, "true") == 0;
 }
 
+void warn_if_conf_damaged(const fs::path& conf) {
+    std::error_code ec;
+    if (!fs::exists(conf, ec)) return;
+    std::string raw;
+    bool too_big = false;
+    if (!read_file_bounded(conf, kMaxConfBytes, raw, too_big)) return;
+    const size_t first = raw.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return;
+    const size_t last = raw.find_last_not_of(" \t\r\n");
+    if (raw[first] != '{' || raw[last] != '}') {
+        std::cerr << "[csy] warning: csyconf.json is not a valid JSON object, so it is being ignored\n";
+        return;
+    }
+    bool present = false;
+    conf_value(conf, present);
+    if (present) {
+        const size_t k = raw.find("\"cooler_compiler\"");
+        size_t i = k + 17;
+        while (i < raw.size() && (std::isspace(static_cast<unsigned char>(raw[i])) || raw[i] == ':')) ++i;
+        if (raw.compare(i, 4, "true") != 0 && raw.compare(i, 5, "false") != 0)
+            std::cerr << "[csy] warning: csyconf.json needs true or false for cooler_compiler, so it is being treated as off\n";
+    }
+}
+
 bool conf_write(const fs::path& conf, bool value, std::string& why) {
     const std::string lit = value ? "true" : "false";
     std::string raw;
@@ -1200,6 +1224,10 @@ int handle_command(int argc, char** argv) {
         }
         wipe = mem_flag && !other;
     }
+    if ((a1 == "enable" || a1 == "disable") && !toggle) {
+        std::cerr << "error: '" << a1 << "' needs a feature name, the only one is 'ccm' (try 'csyc " << a1 << " ccm')\n";
+        return 1;
+    }
     if (!toggle && !wipe) return -1;
 
     try {
@@ -1287,7 +1315,10 @@ void begin(int argc, char** argv) {
         if (g_state) return;
         const fs::path root = provisional_root(argc, argv);
         bool present = false;
-        if (!conf_value(root / "csyconf.json", present)) return;
+        if (!conf_value(root / "csyconf.json", present)) {
+            warn_if_conf_damaged(root / "csyconf.json");
+            return;
+        }
         std::unique_ptr<State> st(new State());
         st->root = root;
         st->tty_out = ::isatty(1) != 0;

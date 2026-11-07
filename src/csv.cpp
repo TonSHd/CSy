@@ -360,7 +360,7 @@ public:
     }
 
     Value table_from(std::vector<ColBuf>& bufs, long long rows) const {
-        std::unordered_map<std::string, Value> columns;
+        DictMap columns;
         std::vector<Value> name_values;
         for (size_t j = 0; j < sel_.size(); j++) {
             name_values.push_back(Value::make_str(names_[j]));
@@ -372,7 +372,7 @@ public:
                 columns[names_[j]] = Value::make_vec(std::move(bufs[j].v));
             }
         }
-        std::unordered_map<std::string, Value> table;
+        DictMap table;
         table["names"] = Value::make_vec(std::move(name_values));
         table["rows"] = Value::make_int(rows);
         table["columns"] = Value::make_dict(std::move(columns));
@@ -547,7 +547,7 @@ struct OutColumn {
 
 void extract_columns(const Value& table, std::vector<OutColumn>& out) {
     if (table.type != Value::Dict) fail("a table must be a dict of columns, or the dict returned by load_csv");
-    const std::unordered_map<std::string, Value>* cols = &*table.dict_val;
+    const DictMap* cols = &*table.dict_val;
     std::vector<std::string> names;
     auto cit = table.dict_val->find("columns");
     bool ordered = false;

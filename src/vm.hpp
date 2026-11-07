@@ -3,6 +3,7 @@
 #include "ir.hpp"
 #include "value.hpp"
 #include "diagnostic.hpp"
+#include <memory>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -39,15 +40,30 @@ private:
     std::vector<std::string> builtin_names_ordered_;
 
     struct Frame {
-        IRFunction* fn;
-        std::vector<Value> locals;
-        size_t ip;
+        IRFunction* fn = nullptr;
+        Value* locals = nullptr;
+        size_t nlocals = 0;
+        size_t chunk = 0;
+        size_t ip = 0;
         int func_index = -1;
         Rc<std::vector<Value>> upvalues;
     };
+    struct LocalsChunk {
+        std::unique_ptr<Value[]> mem;
+        size_t cap = 0;
+        size_t top = 0;
+    };
+    std::vector<LocalsChunk> locals_chunks_;
+    size_t locals_cur_ = 0;
+    std::unordered_map<const IRFunction*, bool> straight_line_cache_;
+    bool is_straight_line(const IRFunction& fn);
+    Value* alloc_locals(size_t n, size_t& chunk_out);
+    void free_locals(Frame& f);
+    std::vector<std::string> error_trail_;
+    bool skip_trail_step_ = false;
     std::vector<Frame> frames_;
     int call_depth_ = 0;
-    static constexpr int kMaxCallDepth = 3000;
+    int max_call_depth_ = 3000;
 
     struct TryHandler {
         size_t frame_depth;
@@ -60,6 +76,10 @@ private:
     std::vector<Value> char_cache_;
     std::string error_context_;
     int error_line_ = 0;
+    int error_col_ = 0;
+    std::vector<signed char> array_write_cache_;
+    bool native_writes_arrays(const IRFunction& fn);
+    std::string error_file_;
     bool stdout_tty_ = false;
     std::vector<Rc<Function>> user_func_cache_;
     std::vector<Rc<Function>> builtin_func_cache_;

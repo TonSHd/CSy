@@ -24,23 +24,23 @@ static void gather_locals(const std::vector<StmtPtr>& body, std::unordered_set<s
                           bool nested = false) {
     for (const auto& s : body) {
         if (!s) continue;
-        if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->target) {
-            if (s->expr->target->kind == ExprKind::Ident) names.insert(s->expr->target->name);
-            else if (s->expr->target->kind == ExprKind::VectorLiteral)
-                for (const auto& el : s->expr->target->elements) if (el && el->kind == ExprKind::Ident) names.insert(el->name);
+        if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target) {
+            if (s->expr->kids().target->kind == ExprKind::Ident) names.insert(s->expr->kids().target->name);
+            else if (s->expr->kids().target->kind == ExprKind::VectorLiteral)
+                for (const auto& el : s->expr->kids().target->kids().elements) if (el && el->kind == ExprKind::Ident) names.insert(el->name);
         } else if (s->kind == StmtKind::FuncDecl) {
-            if (nested) names.insert(s->func_name);
+            if (nested) names.insert(s->aux().func_name);
         } else if (s->kind == StmtKind::If) {
-            gather_locals(s->then_body, names, nested);
-            for (const auto& branch : s->elifs) gather_locals(branch.second, names, nested);
-            gather_locals(s->else_body, names, nested);
+            gather_locals(s->aux().then_body, names, nested);
+            for (const auto& branch : s->aux().elifs) gather_locals(branch.second, names, nested);
+            gather_locals(s->aux().else_body, names, nested);
         } else if (s->kind == StmtKind::While || s->kind == StmtKind::For || s->kind == StmtKind::Block) {
-            if (s->kind == StmtKind::For) names.insert(s->loop_var);
+            if (s->kind == StmtKind::For) names.insert(s->aux().loop_var);
             gather_locals(s->body, names, nested);
         } else if (s->kind == StmtKind::Try) {
-            names.insert(s->catch_var);
+            names.insert(s->aux().catch_var);
             gather_locals(s->body, names, nested);
-            gather_locals(s->then_body, names, nested);
+            gather_locals(s->aux().then_body, names, nested);
         }
     }
 }
@@ -48,20 +48,20 @@ static void gather_locals(const std::vector<StmtPtr>& body, std::unordered_set<s
 static void gather_module_globals(const std::vector<StmtPtr>& body, std::unordered_set<std::string>& names) {
     for (const auto& s : body) {
         if (!s || s->kind == StmtKind::FuncDecl) continue;
-        if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->target) {
-            if (s->expr->target->kind == ExprKind::Ident) names.insert(s->expr->target->name);
-            else if (s->expr->target->kind == ExprKind::VectorLiteral)
-                for (const auto& el : s->expr->target->elements) if (el && el->kind == ExprKind::Ident) names.insert(el->name);
+        if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target) {
+            if (s->expr->kids().target->kind == ExprKind::Ident) names.insert(s->expr->kids().target->name);
+            else if (s->expr->kids().target->kind == ExprKind::VectorLiteral)
+                for (const auto& el : s->expr->kids().target->kids().elements) if (el && el->kind == ExprKind::Ident) names.insert(el->name);
         }
         if (s->kind == StmtKind::If) {
-            gather_module_globals(s->then_body, names);
-            for (const auto& branch : s->elifs) gather_module_globals(branch.second, names);
-            gather_module_globals(s->else_body, names);
+            gather_module_globals(s->aux().then_body, names);
+            for (const auto& branch : s->aux().elifs) gather_module_globals(branch.second, names);
+            gather_module_globals(s->aux().else_body, names);
         } else if (s->kind == StmtKind::While || s->kind == StmtKind::For || s->kind == StmtKind::Block) {
             gather_module_globals(s->body, names);
         } else if (s->kind == StmtKind::Try) {
             gather_module_globals(s->body, names);
-            gather_module_globals(s->then_body, names);
+            gather_module_globals(s->aux().then_body, names);
         }
     }
 }
@@ -86,8 +86,8 @@ struct Rewriter {
             if (source != using_aliases->end()) {
                 const Expr& target = *source->second;
                 ExprPtr member = make_expr(ExprKind::Member, e->tok);
-                member->object = make_expr(ExprKind::Ident, target.object->tok);
-                member->object->name = target.object->name;
+                member->kids_mut().object = make_expr(ExprKind::Ident, target.kids().object->tok);
+                member->kids().object->name = target.kids().object->name;
                 member->name = target.name;
                 e = std::move(member);
                 ++alias_depth;
@@ -96,16 +96,16 @@ struct Rewriter {
                 return;
             }
         }
-        if (e->kind == ExprKind::Member && e->object && e->object->kind == ExprKind::Ident) {
-            auto alias = aliases.find(e->object->name);
+        if (e->kind == ExprKind::Member && e->kids().object && e->kids().object->kind == ExprKind::Ident) {
+            auto alias = aliases.find(e->kids().object->name);
             if (alias != aliases.end()) {
                 const Stmt& connect = *alias->second;
-                if (std::find(connect.connect_exports.begin(), connect.connect_exports.end(), e->name) != connect.connect_exports.end()) {
-                    auto cached = target_cache.find(e->object->name);
+                if (std::find(connect.aux().connect_exports.begin(), connect.aux().connect_exports.end(), e->name) != connect.aux().connect_exports.end()) {
+                    auto cached = target_cache.find(e->kids().object->name);
                     if (cached == target_cache.end()) {
-                        fs::path target = fs::path(file).parent_path() / connect.connect_path;
+                        fs::path target = fs::path(file).parent_path() / connect.aux().connect_path;
                         std::error_code ec;
-                        cached = target_cache.emplace(e->object->name,
+                        cached = target_cache.emplace(e->kids().object->name,
                                                       fs::weakly_canonical(target, ec).string()).first;
                     }
                     const std::string& target_path = cached->second;
@@ -130,36 +130,36 @@ struct Rewriter {
         };
         switch (e->kind) {
             case ExprKind::Ident: rename_ident(e); break;
-            case ExprKind::Binary: expr(e->left, locals); expr(e->right, locals); break;
-            case ExprKind::Unary: expr(e->operand, locals); break;
+            case ExprKind::Binary: expr(e->kids_mut().left, locals); expr(e->kids_mut().right, locals); break;
+            case ExprKind::Unary: expr(e->kids_mut().operand, locals); break;
             case ExprKind::Assign:
-                expr(e->value, locals);
-                if (e->target && e->target->kind == ExprKind::Ident) rename_ident(e->target);
-                else expr(e->target, locals);
+                expr(e->kids_mut().value, locals);
+                if (e->kids().target && e->kids().target->kind == ExprKind::Ident) rename_ident(e->kids_mut().target);
+                else expr(e->kids_mut().target, locals);
                 break;
             case ExprKind::CompoundAssign:
-                expr(e->target, locals); expr(e->value, locals); break;
+                expr(e->kids_mut().target, locals); expr(e->kids_mut().value, locals); break;
             case ExprKind::Call: {
                 std::string connected_name;
-                if (e->callee && e->callee->kind == ExprKind::Member && e->callee->object &&
-                    e->callee->object->kind == ExprKind::Ident && aliases.count(e->callee->object->name))
-                    connected_name = e->callee->object->name + "::" + e->callee->name;
-                expr(e->callee, locals);
-                for (auto& a : e->args) expr(a, locals);
-                if (!connected_name.empty() && warnings && arity && e->callee && e->callee->kind == ExprKind::Ident) {
-                    auto it = arity->find(e->callee->name);
-                    if (it != arity->end() && it->second != e->args.size()) {
+                if (e->kids().callee && e->kids().callee->kind == ExprKind::Member && e->kids().callee->kids().object &&
+                    e->kids().callee->kids().object->kind == ExprKind::Ident && aliases.count(e->kids().callee->kids().object->name))
+                    connected_name = e->kids().callee->kids().object->name + "::" + e->kids().callee->name;
+                expr(e->kids_mut().callee, locals);
+                for (auto& a : e->kids_mut().args) expr(a, locals);
+                if (!connected_name.empty() && warnings && arity && e->kids().callee && e->kids().callee->kind == ExprKind::Ident) {
+                    auto it = arity->find(e->kids().callee->name);
+                    if (it != arity->end() && it->second != e->kids().args.size()) {
                         warnings->push_back(e->tok.loc() + ": warning: '" + connected_name + "' takes " + std::to_string(it->second) +
-                                            " argument(s), but this call passes " + std::to_string(e->args.size()));
+                                            " argument(s), but this call passes " + std::to_string(e->kids().args.size()));
                     }
                 }
                 break;
             }
-            case ExprKind::Member: expr(e->object, locals); break;
-            case ExprKind::Index: expr(e->object, locals); expr(e->index, locals); break;
-            case ExprKind::VectorLiteral: for (auto& x : e->elements) expr(x, locals); break;
+            case ExprKind::Member: expr(e->kids_mut().object, locals); break;
+            case ExprKind::Index: expr(e->kids_mut().object, locals); expr(e->kids_mut().index, locals); break;
+            case ExprKind::VectorLiteral: for (auto& x : e->kids_mut().elements) expr(x, locals); break;
             case ExprKind::DictLiteral:
-                for (auto& pair : e->dict_pairs) { expr(pair.first, locals); expr(pair.second, locals); }
+                for (auto& pair : e->kids_mut().dict_pairs) { expr(pair.first, locals); expr(pair.second, locals); }
                 break;
             default: break;
         }
@@ -171,15 +171,15 @@ struct Rewriter {
             res::poll("linking");
             if (s->kind == StmtKind::FuncDecl) {
                 auto nested_locals = locals;
-                for (const auto& p : s->params) nested_locals.insert(p);
+                for (const auto& p : s->aux().params) nested_locals.insert(p);
                 gather_locals(s->body, nested_locals, true);
                 for (const auto& name : own_module_globals) {
                     if (!locals.count(name) &&
-                        std::find(s->params.begin(), s->params.end(), name) == s->params.end())
+                        std::find(s->aux().params.begin(), s->aux().params.end(), name) == s->aux().params.end())
                         nested_locals.erase(name);
                 }
-                auto name = own_symbols.find(s->func_name);
-                if (name != own_symbols.end() && !locals.count(s->func_name)) s->func_name = name->second;
+                auto name = own_symbols.find(s->aux().func_name);
+                if (name != own_symbols.end() && !locals.count(s->aux().func_name)) s->aux_mut().func_name = name->second;
                 body(s->body, std::move(nested_locals));
                 continue;
             }
@@ -187,12 +187,12 @@ struct Rewriter {
                 case StmtKind::VarDecl: expr(s->expr, locals); break;
                 case StmtKind::ExprStmt: expr(s->expr, locals); break;
                 case StmtKind::If:
-                    expr(s->cond, locals); body(s->then_body, locals);
-                    for (auto& branch : s->elifs) { expr(branch.first, locals); body(branch.second, locals); }
-                    body(s->else_body, locals); break;
+                    expr(s->cond, locals); body(s->aux_mut().then_body, locals);
+                    for (auto& branch : s->aux_mut().elifs) { expr(branch.first, locals); body(branch.second, locals); }
+                    body(s->aux_mut().else_body, locals); break;
                 case StmtKind::While: expr(s->cond, locals); body(s->body, locals); break;
-                case StmtKind::For: expr(s->iterable, locals); locals.insert(s->loop_var); body(s->body, locals); break;
-                case StmtKind::Try: body(s->body, locals); locals.insert(s->catch_var); body(s->then_body, locals); break;
+                case StmtKind::For: expr(s->aux_mut().iterable, locals); locals.insert(s->aux().loop_var); body(s->body, locals); break;
+                case StmtKind::Try: body(s->body, locals); locals.insert(s->aux().catch_var); body(s->aux_mut().then_body, locals); break;
                 case StmtKind::Block: body(s->body, locals); break;
                 case StmtKind::Return: expr(s->ret_value, locals); break;
                 default: break;
@@ -210,11 +210,11 @@ bool namespace_project_symbols(std::vector<SourceUnit>& units, std::string& erro
         gather_module_globals(units[i].parsed.module.body, globals);
         for (const auto& s : units[i].parsed.module.body) {
             std::string name;
-            if (s->kind == StmtKind::FuncDecl) name = s->func_name;
+            if (s->kind == StmtKind::FuncDecl) name = s->aux().func_name;
             if (!name.empty()) {
                 if (symbols.count(name)) { error = "duplicate top-level symbol '" + name + "' in '" + units[i].path + "'"; return false; }
                 symbols[name] = internal_name(i, name);
-                arity_by_symbol[internal_name(i, name)] = s->params.size();
+                arity_by_symbol[internal_name(i, name)] = s->aux().params.size();
             }
         }
         for (const auto& name : globals) {
@@ -224,7 +224,7 @@ bool namespace_project_symbols(std::vector<SourceUnit>& units, std::string& erro
     }
     for (auto& unit : units) {
         std::unordered_map<std::string, const Stmt*> aliases;
-        for (const auto& s : unit.parsed.module.body) if (s->kind == StmtKind::Connect) aliases[s->connect_alias] = s.get();
+        for (const auto& s : unit.parsed.module.body) if (s->kind == StmtKind::Connect) aliases[s->aux().connect_alias] = s.get();
         std::unordered_set<std::string> globals;
         gather_module_globals(unit.parsed.module.body, globals);
         Rewriter rewriter{symbols_by_file[unit.path], globals, aliases, symbols_by_file, unit.path};
@@ -232,15 +232,15 @@ bool namespace_project_symbols(std::vector<SourceUnit>& units, std::string& erro
         rewriter.warnings = warnings;
         std::unordered_set<std::string> module_aliases;
         for (const auto& s : unit.parsed.module.body)
-            if (s && s->kind == StmtKind::Import) module_aliases.insert(s->import_alias);
+            if (s && s->kind == StmtKind::Import) module_aliases.insert(s->aux().import_alias);
         std::unordered_map<std::string, const Expr*> using_map;
         for (const auto& s : unit.parsed.module.body) {
-            if (!s || s->kind != StmtKind::Using || !s->using_expr || s->using_expr->kind != ExprKind::Member) continue;
-            const Expr& target = *s->using_expr;
-            if (!target.object || target.object->kind != ExprKind::Ident || target.name == "out") continue;
-            if (target.object->name == s->using_alias) continue;
-            if (!module_aliases.count(target.object->name) && !aliases.count(target.object->name)) continue;
-            using_map[s->using_alias] = &target;
+            if (!s || s->kind != StmtKind::Using || !s->aux().using_expr || s->aux().using_expr->kind != ExprKind::Member) continue;
+            const Expr& target = *s->aux().using_expr;
+            if (!target.kids().object || target.kids().object->kind != ExprKind::Ident || target.name == "out") continue;
+            if (target.kids().object->name == s->aux().using_alias) continue;
+            if (!module_aliases.count(target.kids().object->name) && !aliases.count(target.kids().object->name)) continue;
+            using_map[s->aux().using_alias] = &target;
         }
         rewriter.using_aliases = &using_map;
         rewriter.body(unit.parsed.module.body, {});
@@ -258,10 +258,10 @@ std::vector<std::string> top_level_names(const Module& module, bool include_priv
     };
     for (const auto& s : module.body) {
         if (!s) continue;
-        if (s->kind == StmtKind::FuncDecl) add(s->func_name);
+        if (s->kind == StmtKind::FuncDecl) add(s->aux().func_name);
         else if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign &&
-                 s->expr->target && s->expr->target->kind == ExprKind::Ident)
-            add(s->expr->target->name);
+                 s->expr->kids().target && s->expr->kids().target->kind == ExprKind::Ident)
+            add(s->expr->kids().target->name);
     }
     return names;
 }

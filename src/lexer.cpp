@@ -88,6 +88,9 @@ std::string token_type_name(TokenType t) {
         case TokenType::SLASH:   return "/";
         case TokenType::PERCENT: return "%";
         case TokenType::PLUS_EQ: return "+=";
+        case TokenType::STAR_EQ: return "*=";
+        case TokenType::SLASH_EQ: return "/=";
+        case TokenType::PERCENT_EQ: return "%=";
         case TokenType::MINUS_EQ:return "-=";
         case TokenType::GT:      return ">";
         case TokenType::LT:      return "<";
@@ -138,6 +141,10 @@ public:
     LexResult run() {
         LexResult result;
         try {
+            if (src_.size() >= 3 && static_cast<unsigned char>(src_[0]) == 0xEF &&
+                static_cast<unsigned char>(src_[1]) == 0xBB && static_cast<unsigned char>(src_[2]) == 0xBF) {
+                pos_ = 3;
+            }
             while (pos_ < src_.size()) {
                 char c = src_[pos_];
                 if (c == '\n') {
@@ -187,7 +194,8 @@ public:
                     lexString();
                     continue;
                 }
-                if (c == ':' && pos_ + 4 <= src_.size() && src_.compare(pos_, 5, "::ext") == 0) {
+                if (c == ':' && pos_ + 5 <= src_.size() && src_.compare(pos_, 5, "::ext") == 0 &&
+                    !ident_char_at(pos_ + 5)) {
                     emit(TokenType::EXT, "::ext");
                     pos_ += 5;
                     col_ += 5;
@@ -223,9 +231,21 @@ public:
                     else { emit(TokenType::MINUS, "-"); pos_++; col_++; }
                     continue;
                 }
-                if (c == '*') { emit(TokenType::STAR, "*"); pos_++; col_++; continue; }
-                if (c == '/') { emit(TokenType::SLASH, "/"); pos_++; col_++; continue; }
-                if (c == '%') { emit(TokenType::PERCENT, "%"); pos_++; col_++; continue; }
+                if (c == '*') {
+                    if (peek(1) == '=') { emit(TokenType::STAR_EQ, "*="); pos_+=2; col_+=2; }
+                    else { emit(TokenType::STAR, "*"); pos_++; col_++; }
+                    continue;
+                }
+                if (c == '/') {
+                    if (peek(1) == '=') { emit(TokenType::SLASH_EQ, "/="); pos_+=2; col_+=2; }
+                    else { emit(TokenType::SLASH, "/"); pos_++; col_++; }
+                    continue;
+                }
+                if (c == '%') {
+                    if (peek(1) == '=') { emit(TokenType::PERCENT_EQ, "%="); pos_+=2; col_+=2; }
+                    else { emit(TokenType::PERCENT, "%"); pos_++; col_++; }
+                    continue;
+                }
                 if (c == '=') {
                     if (peek(1) == '=') { emit(TokenType::EQ, "=="); pos_+=2; col_+=2; }
                     else { emit(TokenType::ASSIGN, "="); pos_++; col_++; }
@@ -267,8 +287,8 @@ public:
             err.type = TokenType::END_OF_FILE;
             err.text = e.what();
             err.file_ptr = file_ptr_;
-            err.line = line_;
-            err.col = col_;
+            err.line = error_line_ > 0 ? error_line_ : line_;
+            err.col = error_line_ > 0 ? error_col_ : col_;
             result.tokens.push_back(err);
         }
         return result;
@@ -281,6 +301,43 @@ private:
     size_t pos_ = 0;
     int line_ = 1;
     int col_ = 1;
+    int error_line_ = 0;
+    int error_col_ = 0;
+
+    static int hex_digit(char ch) {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    }
+
+    bool read_hex_escape(size_t digits, long long& value) const {
+        if (pos_ + 2 + digits > src_.size()) return false;
+        value = 0;
+        for (size_t k = 0; k < digits; k++) {
+            const int d = hex_digit(src_[pos_ + 2 + k]);
+            if (d < 0) return false;
+            value = value * 16 + d;
+        }
+        return true;
+    }
+
+    static void append_utf8(std::string& out, long long cp) {
+        if (cp < 0x80) out.push_back(static_cast<char>(cp));
+        else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
 
     bool ident_char_at(size_t p) const {
         if (p >= src_.size()) return false;
@@ -402,6 +459,22 @@ private:
                     case '\\': value.push_back('\\'); break;
                     case '"': value.push_back('"'); break;
                     case '0': value.push_back('\0'); break;
+                    case 'x': case 'u': case 'U': {
+                        const size_t digits = n == 'x' ? 2 : n == 'u' ? 4 : 8;
+                        long long code = 0;
+                        if (read_hex_escape(digits, code) && code <= 0x10FFFF && !(code >= 0xD800 && code <= 0xDFFF)) {
+                            if (n == 'x') value.push_back(static_cast<char>(code));
+                            else append_utf8(value, code);
+                            pos_ += 2 + digits;
+                            col_ += static_cast<int>(2 + digits);
+                            continue;
+                        }
+                        error_line_ = line_;
+                        error_col_ = col_;
+                        throw std::runtime_error(std::string("invalid \\") + n + " escape: expected " +
+                                                 std::to_string(digits) + " hex digits" +
+                                                 (n == 'x' ? "" : " forming a valid Unicode code point"));
+                    }
                     default: value.push_back('\\'); value.push_back(n); break;
                 }
                 pos_ += 2;
@@ -414,7 +487,9 @@ private:
             pos_++;
         }
         if (pos_ >= src_.size()) {
-            throw std::runtime_error("unterminated string literal");
+            error_line_ = start_line;
+            error_col_ = start_col;
+            throw std::runtime_error("unterminated string literal (the string opened here is never closed with a double quote)");
         }
         pos_++; col_++;
         count_token();

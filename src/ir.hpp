@@ -55,6 +55,10 @@ enum class Op : uint8_t {
     Q_BIN_JMPF,
     Q_CMP_JMPF,
     Q_GETIDX,
+    Q_FOR_HEAD,
+    Q_INC_JMP,
+    Q_CALL_FUNC,
+    Q_RET_LOCAL,
 };
 
 struct Instr {
@@ -68,17 +72,31 @@ struct NativeArg {
     double number;
     long long ival;
     double* data;
+    long long* idata;
     long long length;
     int is_array;
+    const void* opaque;
+    void* context;
+    long long (*fallback)(void*, int, const void*, int*);
 };
 union NativeRet { long long i; double f; };
 typedef void (*NativeEntry)(const NativeArg* args, int* err, int* rtag, NativeRet* out);
+struct NativeSite {
+    std::string func;
+    std::string file;
+    int line = 0;
+    int col = 0;
+};
+
 struct NativeVariant {
     NativeEntry entry = nullptr;
+    uint32_t site_base = 0;
     uint32_t sig = 0;
+    uint16_t opaque_mask = 0;
     uint8_t nparams = 0;
     std::vector<int> global_indices;
     bool ret_float = false;
+    bool ret_bool = false;
 };
 
 struct QInstr {
@@ -106,6 +124,7 @@ struct IRFunction {
 
 struct IRModule {
     std::string file;
+    std::vector<std::string> unit_files;
     std::vector<IRFunction> functions;
     int main_func_index = -1;
     std::vector<long long> int_pool;
@@ -122,6 +141,7 @@ struct IRModule {
     std::string native_library;
     std::string native_target;
     std::string native_x64;
+    std::vector<NativeSite> native_sites;
     int add_int(long long v);
     int add_float(double v);
     int add_str(const std::string& s);
@@ -132,4 +152,3 @@ struct IRModule {
 std::string disassemble(const IRModule& mod);
 
 }
-

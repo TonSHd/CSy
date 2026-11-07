@@ -350,7 +350,7 @@ Value fn_load_bin(std::vector<Value>& a) {
     std::vector<double>& dst = *arr.f64_array_val;
     const unsigned char* src = reinterpret_cast<const unsigned char*>(body);
     for (size_t k = 0; k < static_cast<size_t>(count); k++) dst[k] = decode_element(src + k * t->size, *t);
-    std::unordered_map<std::string, Value> result;
+    DictMap result;
     result["dtype"] = Value::make_str(t->name);
     result["shape"] = Value::make_vec(std::move(dims));
     result["data"] = std::move(arr);
@@ -757,7 +757,7 @@ public:
 };
 
 Value make_info(std::initializer_list<std::pair<const char*, Value>> items) {
-    std::unordered_map<std::string, Value> m;
+    DictMap m;
     for (const auto& kv : items) m[kv.first] = kv.second;
     return Value::make_dict(std::move(m));
 }
@@ -869,7 +869,7 @@ public:
         }
         if (got == 0) return Value();
         rows_read_ += got;
-        std::unordered_map<std::string, Value> columns;
+        DictMap columns;
         std::vector<Value> name_values;
         for (size_t j = 0; j < names.size(); j++) {
             name_values.push_back(Value::make_str(names[j]));
@@ -881,7 +881,7 @@ public:
                 columns[names[j]] = Value::make_vec(std::move(builders[j].v));
             }
         }
-        std::unordered_map<std::string, Value> table;
+        DictMap table;
         table["names"] = Value::make_vec(std::move(name_values));
         table["rows"] = Value::make_int(got);
         table["columns"] = Value::make_dict(std::move(columns));
@@ -1269,7 +1269,7 @@ long long handle_arg(const std::vector<Value>& a, size_t index, const char* who)
     return a[index].int_val;
 }
 
-const std::unordered_map<std::string, Value>* options_arg(const std::vector<Value>& a, size_t index, const char* who,
+const DictMap* options_arg(const std::vector<Value>& a, size_t index, const char* who,
                                                           std::initializer_list<const char*> allowed) {
     if (a.size() <= index || a[index].type == Value::None) return nullptr;
     if (a[index].type != Value::Dict) fail(std::string(who) + ": options must be a dict");
@@ -1285,7 +1285,7 @@ const std::unordered_map<std::string, Value>* options_arg(const std::vector<Valu
     return &*a[index].dict_val;
 }
 
-const Value* option(const std::unordered_map<std::string, Value>* o, const char* key) {
+const Value* option(const DictMap* o, const char* key) {
     if (!o) return nullptr;
     auto it = o->find(key);
     return it == o->end() ? nullptr : &it->second;

@@ -25,6 +25,7 @@ constexpr uint8_t kVersionPlain = 1;
 constexpr uint8_t kVersionNative = 2;
 constexpr uint8_t kVersionNative3 = 3;
 constexpr uint64_t kNativeTag = 0x5654414e5359434fULL;
+constexpr uint64_t kUnitTag = 0x544e55434e53594fULL;
 constexpr uint64_t kMaxNativeBytes = 80ull * 1024 * 1024;
 
 class BoundedFdBuf : public std::streambuf {
@@ -289,6 +290,8 @@ bool validate_module(const IRModule& module) {
                     break;
                 case Op::Q_BIN: case Op::Q_BIN_STORE: case Op::Q_BIN_JMPF:
                 case Op::Q_CMP_JMPF: case Op::Q_GETIDX:
+                case Op::Q_FOR_HEAD: case Op::Q_INC_JMP:
+                case Op::Q_CALL_FUNC: case Op::Q_RET_LOCAL:
                     return false;
             }
             if (depth < required || depth + delta < 0 || depth + delta > 1000000) return false;
@@ -349,6 +352,10 @@ bool write_object_file(const std::string& path, const IRModule& m, std::string& 
              put_blob(out, m.native_c_source) && put_blob(out, m.native_library) &&
              put_blob(out, m.native_x64);
     }
+    if (ok && !m.unit_files.empty()) {
+        ok = put(out, kUnitTag) &&
+             put_vector(out, m.unit_files, [&](const std::string& x){ return put_string(out, x); });
+    }
     out.flush();
     const bool flushed = bool(out) && ::fsync(fd) == 0;
     const bool closed = ::close(fd) == 0;
@@ -361,11 +368,14 @@ bool write_object_file(const std::string& path, const IRModule& m, std::string& 
             : "failed while writing object file '" + path + "'";
         return false;
     }
-    if (::rename(temp_path.c_str(), path.c_str()) != 0) {
+    struct stat target_stat{};
+    const bool target_is_special = ::stat(path.c_str(), &target_stat) == 0 && !S_ISREG(target_stat.st_mode);
+    if (target_is_special || ::rename(temp_path.c_str(), path.c_str()) != 0) {
         std::error_code ignored;
         std::filesystem::remove(temp_path, ignored);
         res::unregister_temp_path(temp_path);
-        error = "cannot replace object file '" + path + "'";
+        error = target_is_special ? "'" + path + "' exists and is not a regular file, so it will not be replaced"
+                                  : "cannot replace object file '" + path + "'";
         return false;
     }
     res::unregister_temp_path(temp_path);
@@ -407,6 +417,11 @@ bool read_object_image(const std::string& image, const std::string& label, IRMod
         ok = get(in, tag) && tag == kNativeTag && get_string(in, m.native_target) &&
              get_blob(in, m.native_c_source) && get_blob(in, m.native_library) &&
              (version == kVersionNative || get_blob(in, m.native_x64));
+    }
+    if (ok && remaining_bytes(in) != 0) {
+        uint64_t tag = 0;
+        ok = get(in, tag) && tag == kUnitTag &&
+             get_vector(in, m.unit_files, sizeof(uint64_t), [&](std::string& x){ return get_string(in, x); });
     }
     if (!ok || remaining_bytes(in) != 0 || !validate_module(m)) {
         error = "object file '" + label + "' is truncated or invalid"; return false;

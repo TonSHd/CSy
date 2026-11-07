@@ -464,7 +464,7 @@ void register_nvidia_builtins(VM& vm) {
 
     builtins["nv_info"] = [device_index_arg](VM&, std::vector<Value>& args) -> Value {
         unsigned int idx = device_index_arg(args);
-        std::unordered_map<std::string, Value> info;
+        DictMap info;
         info["available"] = Value::make_bool(nv_is_available());
         info["device_count"] = Value::make_int(nv_device_count_impl());
         info["index"] = Value::make_int((long long)idx);

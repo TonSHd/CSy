@@ -105,11 +105,12 @@ Other things CSy has that are easy to miss:
 - loading and saving AI datasets: JSON, JSONL, Parquet, CSV, `.bin` tensors and text files (`bc::load_dataset`, `bc::save_dataset`)
 - the Cooler Compiler, which stays off until you run `csyc enable ccm`
 
-One thing that trips people: printing a comparison needs parentheses.
-`o>(x == 5);` prints the result, `o>x == 5;` prints nothing.
+Most comparisons can follow the output operator directly: `o>x == 5;` prints `true`.
+The greater-than operator itself is also the output separator, so print that comparison as
+`o>(x > 4);`.
 
 You can learn everything including features in our learning document in CSY_SYNTAX_REFERENCE.md!
-CSy was still in early version (1.1.0) so you might encounter weird stuff.
+CSy was still in early version (1.2.0) so you might encounter weird stuff.
 But don't just ignore it! Tell us in issues
 
 ## Warnings

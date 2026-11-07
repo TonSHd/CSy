@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <tuple>
 #include <dirent.h>
 #include <ctime>
 #include <set>
@@ -18,6 +19,7 @@
 #include <fcntl.h>
 #include <cerrno>
 #include <unistd.h>
+#include <sys/prctl.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <sys/utsname.h>
@@ -37,7 +39,7 @@ void dbg(const std::string& msg) {
     if (debug_on()) fprintf(stderr, "[csy][jit-debug] %s\n", msg.c_str());
 }
 
-enum class MathKind { AlwaysFloat1, AlwaysFloat2, AlwaysFloat3, Promote2, Pred1 };
+enum class MathKind { AlwaysFloat1, AlwaysFloat2, AlwaysFloat3, Promote2, Pred1, ToInt };
 struct MathBuiltin { MathKind kind; std::string c_expr_template; };
 
 const std::unordered_map<std::string, MathBuiltin>& math_whitelist() {
@@ -71,6 +73,7 @@ const std::unordered_map<std::string, MathBuiltin>& math_whitelist() {
         {"min",   {MathKind::Promote2, ""}},
         {"isnan", {MathKind::Pred1, "(isnan({0}) != 0)"}},
         {"isinf", {MathKind::Pred1, "(isinf({0}) != 0)"}},
+        {"int",   {MathKind::ToInt, ""}},
     };
     return m;
 }
@@ -79,7 +82,8 @@ const char* kPreamble = R"PRE(
 #include <math.h>
 #include <limits.h>
 
-typedef struct { double number; long long ival; double* data; long long length; int is_array; } CsyNativeArg;
+typedef long long (*CsyNativeFallback)(void*, int, const void*, int*);
+typedef struct { double number; long long ival; double* data; long long* idata; long long length; int is_array; const void* opaque; void* context; CsyNativeFallback fallback; } CsyNativeArg;
 typedef union { long long i; double f; } CsyRet;
 
 static long long csy_bound_f(double d) {
@@ -88,61 +92,113 @@ static long long csy_bound_f(double d) {
     return (long long)d;
 }
 
-static double csy_array_get(double* data, long long length, long long index, int* err) {
+static double csy_array_get(double* data, long long length, long long index, int* err, int site) {
     if (*err) return 0.0;
     if (index < 0) index += length;
-    if (index < 0 || index >= length) { if (*err == 0) *err = 3; return 0.0; }
+    if (index < 0 || index >= length) { if (*err == 0) *err = 3 | (site << 8); return 0.0; }
     return data[index];
 }
-static void csy_array_set(double* data, long long length, long long index, double value, int* err) {
+static void csy_array_set(double* data, long long length, long long index, double value, int* err, int site) {
     if (*err) return;
     if (index < 0) index += length;
-    if (index < 0 || index >= length) { if (*err == 0) *err = 3; return; }
+    if (index < 0 || index >= length) { if (*err == 0) *err = 3 | (site << 8); return; }
     data[index] = value;
 }
 static void csy_array_compound(double* data, long long length, long long index,
-                               double value, int subtract, int* err) {
+                               double value, int subtract, int* err, int site) {
     if (*err) return;
     if (index < 0) index += length;
-    if (index < 0 || index >= length) { if (*err == 0) *err = 3; return; }
+    if (index < 0 || index >= length) { if (*err == 0) *err = 3 | (site << 8); return; }
     data[index] += subtract ? -value : value;
+}
+static long long csy_i64_array_get(long long* data, long long length, long long index, int* err, int site) {
+    if (*err) return 0;
+    if (index < 0) index += length;
+    if (index < 0 || index >= length) { if (*err == 0) *err = 13 | (site << 8); return 0; }
+    return data[index];
+}
+static void csy_i64_array_set(long long* data, long long length, long long index, long long value, int* err, int site) {
+    if (*err) return;
+    if (index < 0) index += length;
+    if (index < 0 || index >= length) { if (*err == 0) *err = 13 | (site << 8); return; }
+    data[index] = value;
+}
+static void csy_i64_array_compound(long long* data, long long length, long long index,
+                                   long long value, int subtract, int* err, int site) {
+    if (*err) return;
+    if (index < 0) index += length;
+    if (index < 0 || index >= length) { if (*err == 0) *err = 13 | (site << 8); return; }
+    long long result;
+    const int overflow = subtract ? __builtin_sub_overflow(data[index], value, &result)
+                                 : __builtin_add_overflow(data[index], value, &result);
+    if (overflow) { if (*err == 0) *err = (subtract ? 6 : 4) | (site << 8); return; }
+    data[index] = result;
 }
 
 static double csy_clamp(double x, double lo, double hi) { if (x != x || lo != lo || hi != hi) return __builtin_nan(""); return fmax(lo, fmin(x, hi)); }
 static double csy_sign(double x) { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 static double csy_sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
-static double csy_relu(double x) { return x > 0.0 ? x : 0.0; }
+static double csy_relu(double x) { return x > 0.0 ? x : (x != x ? x : 0.0); }
 static double csy_sigmoid_deriv(double y) { return y * (1.0 - y); }
 static double csy_relu_deriv(double y) { return y > 0.0 ? 1.0 : 0.0; }
 static double csy_tanh_deriv(double y) { return 1.0 - y * y; }
+static double csy_fmax(double a, double b) { return (a != a || b != b) ? __builtin_nan("") : fmax(a, b); }
+static double csy_fmin(double a, double b) { return (a != a || b != b) ? __builtin_nan("") : fmin(a, b); }
 static long long csy_max_i(long long a, long long b) { return a > b ? a : b; }
 static long long csy_min_i(long long a, long long b) { return a < b ? a : b; }
-static long long csy_overflow(int* err) { if (*err == 0) *err = 4; return 0; }
-static long long csy_safe_add_i(long long a, long long b, int* err) {
-    long long r; if (__builtin_add_overflow(a, b, &r)) return csy_overflow(err); return r;
+static long long csy_overflow(int* err, int code, int site) { if (*err == 0) *err = code | (site << 8); return 0; }
+static long long csy_safe_add_i(long long a, long long b, int* err, int site) {
+    long long r; if (__builtin_add_overflow(a, b, &r)) return csy_overflow(err, 4, site); return r;
 }
-static long long csy_safe_sub_i(long long a, long long b, int* err) {
-    long long r; if (__builtin_sub_overflow(a, b, &r)) return csy_overflow(err); return r;
+static long long csy_safe_sub_i(long long a, long long b, int* err, int site) {
+    long long r; if (__builtin_sub_overflow(a, b, &r)) return csy_overflow(err, 6, site); return r;
 }
-static long long csy_safe_mul_i(long long a, long long b, int* err) {
-    long long r; if (__builtin_mul_overflow(a, b, &r)) return csy_overflow(err); return r;
+static long long csy_safe_mul_i(long long a, long long b, int* err, int site) {
+    long long r; if (__builtin_mul_overflow(a, b, &r)) return csy_overflow(err, 7, site); return r;
 }
-static long long csy_safe_neg_i(long long a, int* err) {
-    if (a == LLONG_MIN) return csy_overflow(err); return -a;
+static long long csy_safe_neg_i(long long a, int* err, int site) {
+    if (a == LLONG_MIN) return csy_overflow(err, 8, site); return -a;
 }
-static long long csy_safe_mod_i(long long a, long long b, int* err) {
-    if (b == 0) { if (*err == 0) *err = 1; return 0; }
+static long long csy_safe_to_int_f(double x, int* err, int site) {
+    if (!isfinite(x) || x < -0x1p63 || x >= 0x1p63) return csy_overflow(err, 10, site);
+    return (long long)x;
+}
+static int csy_cmp_id(long long i, double d) {
+    if (d != d) return 2;
+    if (i >= -9007199254740992LL && i <= 9007199254740992LL) { double x = (double)i; return x < d ? -1 : (x > d ? 1 : 0); }
+    if (d >= 0x1p63) return -1;
+    if (d < -0x1p63) return 1;
+    double fl = floor(d);
+    long long fi = (long long)fl;
+    if (i < fi) return -1;
+    if (i > fi) return 1;
+    return d > fl ? -1 : 0;
+}
+static int csy_cmp_mixed(long long i, double d, int int_left, int op) {
+    int c = csy_cmp_id(i, d);
+    if (!int_left && c != 2) c = -c;
+    switch (op) {
+        case 0: return c == 0;
+        case 1: return c != 0;
+        case 2: return c == -1;
+        case 3: return c == 1;
+        case 4: return c == -1 || c == 0;
+        default: return c == 1 || c == 0;
+    }
+}
+static long long csy_safe_mod_i(long long a, long long b, int* err, int site) {
+    if (b == 0) { if (*err == 0) *err = 12 | (site << 8); return 0; }
     if (a == LLONG_MIN && b == -1) return 0;
     return a % b;
 }
 
-static double csy_safe_div_f(double a, double b, int* err) {
-    if (b == 0.0) { if (*err == 0) *err = 1; return 0.0; }
+static double csy_safe_div_f(double a, double b, int* err, int site) {
+    if (b == 0.0) { if (*err == 0) *err = 1 | (site << 8); return 0.0; }
     return a / b;
 }
-static long long csy_safe_div_i(long long a, long long b, int* err) {
-    if (b == 0) { if (*err == 0) *err = 1; return 0; }
-    if (a == LLONG_MIN && b == -1) return csy_overflow(err);
+static long long csy_safe_div_i(long long a, long long b, int* err, int site) {
+    if (b == 0) { if (*err == 0) *err = 1 | (site << 8); return 0; }
+    if (a == LLONG_MIN && b == -1) return csy_overflow(err, 9, site);
     return a / b;
 }
 
@@ -153,7 +209,12 @@ static long long csy_safe_div_i(long long a, long long b, int* err) {
 
 
 
-enum class NType { Int, Float, Array };
+constexpr const char* kLenCall = "__csy_len";
+
+bool builtin_call_name(const std::string& n) { return math_whitelist().count(n) != 0 || n == kLenCall; }
+
+enum class NType { Int, Float, Array, I64Array, Opaque };
+bool is_array_type(NType type) { return type == NType::Array || type == NType::I64Array; }
 
 struct FnInfo {
     const Stmt* decl = nullptr;
@@ -162,6 +223,7 @@ struct FnInfo {
     std::vector<std::string> global_params;
     std::unordered_set<std::string> direct_global_reads;
     std::unordered_set<std::string> array_params;
+    std::unordered_set<std::string> opaque_params;
     std::unordered_set<std::string> calls_candidates;
     bool syntax_ok = false;
     std::string why_syntax;
@@ -193,6 +255,109 @@ bool returns_maybe_int(const FnInfo& f) {
     return f.return_type == NType::Float && (f.ret_seen & 1) != 0;
 }
 
+thread_local const std::unordered_set<std::string>* g_bool_functions = nullptr;
+
+bool boolish_expr(const ExprPtr& e) {
+    if (!e) return false;
+    if (e->kind == ExprKind::Bool) return true;
+    if (e->kind == ExprKind::Call) {
+        return g_bool_functions && e->kids().callee && e->kids().callee->kind == ExprKind::Ident &&
+               g_bool_functions->count(e->kids().callee->name) != 0;
+    }
+    if (e->kind == ExprKind::Unary) return e->op == TokenType::NOT;
+    if (e->kind == ExprKind::Binary) {
+        return e->op == TokenType::LT || e->op == TokenType::GT || e->op == TokenType::LE ||
+               e->op == TokenType::GE || e->op == TokenType::EQ || e->op == TokenType::NEQ ||
+               e->op == TokenType::AND || e->op == TokenType::OR;
+    }
+    return false;
+}
+
+void count_return_kinds(const std::vector<StmtPtr>& body, int& boolish, int& other) {
+    for (const auto& s : body) {
+        if (!s) continue;
+        if (s->kind == StmtKind::Return && s->ret_value) {
+            if (boolish_expr(s->ret_value)) boolish++;
+            else other++;
+        }
+        count_return_kinds(s->body, boolish, other);
+        count_return_kinds(s->aux().then_body, boolish, other);
+        count_return_kinds(s->aux().else_body, boolish, other);
+        for (const auto& el : s->aux().elifs) count_return_kinds(el.second, boolish, other);
+    }
+}
+
+bool decl_returns_bool(const Stmt* decl) {
+    if (!decl) return false;
+    int boolish = 0, other = 0;
+    count_return_kinds(decl->body, boolish, other);
+    return boolish > 0 && other == 0;
+}
+
+struct ReturnShape {
+    bool any = false;
+    bool plain_other = false;
+    std::vector<std::string> call_targets;
+};
+
+void collect_return_shape(const std::vector<StmtPtr>& body, const std::unordered_set<std::string>& names, ReturnShape& shape) {
+    for (const auto& s : body) {
+        if (!s) continue;
+        if (s->kind == StmtKind::Return && s->ret_value) {
+            shape.any = true;
+            const ExprPtr& r = s->ret_value;
+            if (boolish_expr(r)) {
+            } else if (r->kind == ExprKind::Call && r->kids().callee && r->kids().callee->kind == ExprKind::Ident &&
+                       names.count(r->kids().callee->name)) {
+                shape.call_targets.push_back(r->kids().callee->name);
+            } else {
+                shape.plain_other = true;
+            }
+        }
+        collect_return_shape(s->body, names, shape);
+        collect_return_shape(s->aux().then_body, names, shape);
+        collect_return_shape(s->aux().else_body, names, shape);
+        for (const auto& el : s->aux().elifs) collect_return_shape(el.second, names, shape);
+    }
+}
+
+template <typename Map>
+std::unordered_set<std::string> compute_bool_functions(const Map& fns) {
+    std::unordered_set<std::string> names;
+    for (const auto& kv : fns) names.insert(kv.first);
+    std::unordered_map<std::string, ReturnShape> shapes;
+    std::unordered_set<std::string> result;
+    for (const auto& kv : fns) {
+        if (!kv.second.decl) continue;
+        ReturnShape shape;
+        collect_return_shape(kv.second.decl->body, names, shape);
+        if (shape.any && !shape.plain_other) {
+            result.insert(kv.first);
+            shapes.emplace(kv.first, std::move(shape));
+        }
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto it = result.begin(); it != result.end();) {
+            bool keep = true;
+            for (const auto& target : shapes.at(*it).call_targets)
+                if (!result.count(target)) { keep = false; break; }
+            if (keep) ++it;
+            else { it = result.erase(it); changed = true; }
+        }
+    }
+    return result;
+}
+
+class BoolFunctionScope {
+public:
+    explicit BoolFunctionScope(const std::unordered_set<std::string>* set) : prev_(g_bool_functions) { g_bool_functions = set; }
+    ~BoolFunctionScope() { g_bool_functions = prev_; }
+private:
+    const std::unordered_set<std::string>* prev_;
+};
+
 char arg_sig_char(const InstMap& insts, const FnInfo& caller, const ExprPtr& a) {
     if (infer_expr_type(insts, caller, a) == NType::Int) return 'I';
     return definitely_float(insts, caller, a) ? 'F' : 'M';
@@ -200,27 +365,35 @@ char arg_sig_char(const InstMap& insts, const FnInfo& caller, const ExprPtr& a) 
 
 bool callee_key(const InstMap& insts, const FnInfo& caller, const ExprPtr& call,
                 std::string& key_out, std::string* base_out = nullptr, std::string* sig_out = nullptr) {
-    if (!call || call->kind != ExprKind::Call || !call->callee || call->callee->kind != ExprKind::Ident) return false;
+    if (!call || call->kind != ExprKind::Call || !call->kids().callee || call->kids().callee->kind != ExprKind::Ident) return false;
     if (!caller.bases) return false;
-    auto b = caller.bases->find(call->callee->name);
+    auto b = caller.bases->find(call->kids().callee->name);
     if (b == caller.bases->end()) return false;
     const FnInfo& base = b->second;
-    if (call->args.size() != base.user_param_count) return false;
+    if (call->kids().args.size() != base.user_param_count) return false;
     std::string sig;
-    for (size_t i = 0; i < call->args.size(); i++) {
-        if (base.array_params.count(base.param_names[i])) sig += 'A';
-        else sig += arg_sig_char(insts, caller, call->args[i]);
+    for (size_t i = 0; i < call->kids().args.size(); i++) {
+        if (base.array_params.count(base.param_names[i])) {
+            const NType type = infer_expr_type(insts, caller, call->kids().args[i]);
+            if (type == NType::I64Array) sig += 'J';
+            else if (type == NType::Array) sig += 'A';
+            else return false;
+        } else if (base.opaque_params.count(base.param_names[i])) {
+            if (call->kids().args[i]->kind != ExprKind::Ident ||
+                !caller.opaque_params.count(call->kids().args[i]->name)) return false;
+            sig += 'O';
+        } else sig += arg_sig_char(insts, caller, call->kids().args[i]);
     }
     for (const auto& global : base.global_params) {
         auto local = caller.local_types.find(global);
-        if (local == caller.local_types.end() || local->second == NType::Array) return false;
+        if (local == caller.local_types.end() || is_array_type(local->second)) return false;
         auto ident = std::make_shared<Expr>();
         ident->kind = ExprKind::Ident;
         ident->name = global;
         sig += arg_sig_char(insts, caller, ident);
     }
-    key_out = call->callee->name + "$" + sig;
-    if (base_out) *base_out = call->callee->name;
+    key_out = call->kids().callee->name + "$" + sig;
+    if (base_out) *base_out = call->kids().callee->name;
     if (sig_out) *sig_out = sig;
     return true;
 }
@@ -235,27 +408,33 @@ NType infer_expr_type(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
             return it != fn.local_types.end() ? it->second : NType::Int;
         }
         case ExprKind::Unary:
-            return e->op == TokenType::MINUS ? infer_expr_type(insts, fn, e->operand) : NType::Int;
+            return e->op == TokenType::MINUS ? infer_expr_type(insts, fn, e->kids().operand) : NType::Int;
         case ExprKind::Binary: {
             if (e->op == TokenType::LT || e->op == TokenType::GT || e->op == TokenType::LE ||
                 e->op == TokenType::GE || e->op == TokenType::EQ || e->op == TokenType::NEQ ||
                 e->op == TokenType::AND || e->op == TokenType::OR) {
                 return NType::Int;
             }
-            NType l = infer_expr_type(insts, fn, e->left), r = infer_expr_type(insts, fn, e->right);
+            NType l = infer_expr_type(insts, fn, e->kids().left), r = infer_expr_type(insts, fn, e->kids().right);
             return (l == NType::Float || r == NType::Float) ? NType::Float : NType::Int;
         }
-        case ExprKind::Index: return NType::Float;
+        case ExprKind::Index:
+            return e->kids().object && e->kids().object->kind == ExprKind::Ident &&
+                fn.local_types.count(e->kids().object->name) &&
+                fn.local_types.at(e->kids().object->name) == NType::I64Array ? NType::Int : NType::Float;
         case ExprKind::Call: {
-            const std::string& name = e->callee->name;
+            const std::string& name = e->kids().callee->name;
+            if (name == "f64_array") return NType::Array;
+            if (name == "i64_array") return NType::I64Array;
             auto mit = math_whitelist().find(name);
             if (mit != math_whitelist().end()) {
                 if (mit->second.kind == MathKind::Promote2) {
-                    NType a = e->args.size() > 0 ? infer_expr_type(insts, fn, e->args[0]) : NType::Int;
-                    NType b = e->args.size() > 1 ? infer_expr_type(insts, fn, e->args[1]) : NType::Int;
+                    NType a = e->kids().args.size() > 0 ? infer_expr_type(insts, fn, e->kids().args[0]) : NType::Int;
+                    NType b = e->kids().args.size() > 1 ? infer_expr_type(insts, fn, e->kids().args[1]) : NType::Int;
                     return (a == NType::Float || b == NType::Float) ? NType::Float : NType::Int;
                 }
                 if (mit->second.kind == MathKind::Pred1) return NType::Int;
+                if (mit->second.kind == MathKind::ToInt) return NType::Int;
                 return NType::Float;
             }
             std::string key;
@@ -281,21 +460,21 @@ bool definitely_float(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
             return s == fn.seen.end() || (s->second & 1) == 0;
         }
         case ExprKind::Unary:
-            return e->op == TokenType::MINUS && definitely_float(insts, fn, e->operand);
+            return e->op == TokenType::MINUS && definitely_float(insts, fn, e->kids().operand);
         case ExprKind::Binary:
             if (e->op == TokenType::PLUS || e->op == TokenType::MINUS || e->op == TokenType::STAR ||
                 e->op == TokenType::SLASH || e->op == TokenType::PERCENT) {
-                return definitely_float(insts, fn, e->left) || definitely_float(insts, fn, e->right);
+                return definitely_float(insts, fn, e->kids().left) || definitely_float(insts, fn, e->kids().right);
             }
             return false;
-        case ExprKind::Index: return true;
+        case ExprKind::Index: return infer_expr_type(insts, fn, e) == NType::Float;
         case ExprKind::Call: {
-            auto mit = math_whitelist().find(e->callee->name);
+            auto mit = math_whitelist().find(e->kids().callee->name);
             if (mit != math_whitelist().end()) {
-                if (mit->second.kind == MathKind::Pred1) return false;
+                if (mit->second.kind == MathKind::Pred1 || mit->second.kind == MathKind::ToInt) return false;
                 if (mit->second.kind != MathKind::Promote2) return true;
-                return (e->args.size() > 0 && definitely_float(insts, fn, e->args[0])) ||
-                       (e->args.size() > 1 && definitely_float(insts, fn, e->args[1]));
+                return (e->kids().args.size() > 0 && definitely_float(insts, fn, e->kids().args[0])) ||
+                       (e->kids().args.size() > 1 && definitely_float(insts, fn, e->kids().args[1]));
             }
             std::string key;
             if (callee_key(insts, fn, e, key)) {
@@ -312,13 +491,13 @@ bool definitely_float(const InstMap& insts, const FnInfo& fn, const ExprPtr& e) 
 bool expr_tree_all(const ExprPtr& e, const std::function<bool(const ExprPtr&)>& pred) {
     if (!e) return true;
     if (!pred(e)) return false;
-    if (!expr_tree_all(e->left, pred) || !expr_tree_all(e->right, pred) ||
-        !expr_tree_all(e->operand, pred) || !expr_tree_all(e->target, pred) ||
-        !expr_tree_all(e->value, pred) || !expr_tree_all(e->callee, pred) ||
-        !expr_tree_all(e->object, pred) || !expr_tree_all(e->index, pred)) return false;
-    for (const auto& a : e->args) if (!expr_tree_all(a, pred)) return false;
-    for (const auto& item : e->elements) if (!expr_tree_all(item, pred)) return false;
-    for (const auto& pair : e->dict_pairs)
+    if (!expr_tree_all(e->kids().left, pred) || !expr_tree_all(e->kids().right, pred) ||
+        !expr_tree_all(e->kids().operand, pred) || !expr_tree_all(e->kids().target, pred) ||
+        !expr_tree_all(e->kids().value, pred) || !expr_tree_all(e->kids().callee, pred) ||
+        !expr_tree_all(e->kids().object, pred) || !expr_tree_all(e->kids().index, pred)) return false;
+    for (const auto& a : e->kids().args) if (!expr_tree_all(a, pred)) return false;
+    for (const auto& item : e->kids().elements) if (!expr_tree_all(item, pred)) return false;
+    for (const auto& pair : e->kids().dict_pairs)
         if (!expr_tree_all(pair.first, pred) || !expr_tree_all(pair.second, pred)) return false;
     return true;
 }
@@ -326,12 +505,12 @@ bool expr_tree_all(const ExprPtr& e, const std::function<bool(const ExprPtr&)>& 
 bool all_stmt_exprs(const std::vector<StmtPtr>& body, const std::function<bool(const ExprPtr&)>& check) {
     for (const auto& s : body) {
         if (!s) continue;
-        const ExprPtr& iterable = s->kind == StmtKind::For && s->iterable && !s->iterable->args.empty()
-                                      ? s->iterable->args[0] : s->iterable;
+        const ExprPtr& iterable = s->kind == StmtKind::For && s->aux().iterable && !s->aux().iterable->kids().args.empty()
+                                      ? s->aux().iterable->kids().args[0] : s->aux().iterable;
         if (!check(s->expr) || !check(s->cond) || !check(iterable) || !check(s->ret_value)) return false;
-        if (!all_stmt_exprs(s->body, check) || !all_stmt_exprs(s->then_body, check) ||
-            !all_stmt_exprs(s->else_body, check)) return false;
-        for (const auto& branch : s->elifs) {
+        if (!all_stmt_exprs(s->body, check) || !all_stmt_exprs(s->aux().then_body, check) ||
+            !all_stmt_exprs(s->aux().else_body, check)) return false;
+        for (const auto& branch : s->aux().elifs) {
             if (!check(branch.first) || !all_stmt_exprs(branch.second, check)) return false;
         }
     }
@@ -364,13 +543,13 @@ bool int_constant_value(const ExprPtr& e, long long& out) {
             return true;
         case ExprKind::Unary: {
             long long v = 0;
-            if (e->op != TokenType::MINUS || !int_constant_value(e->operand, v) || v == LLONG_MIN) return false;
+            if (e->op != TokenType::MINUS || !int_constant_value(e->kids().operand, v) || v == LLONG_MIN) return false;
             out = -v;
             return true;
         }
         case ExprKind::Binary: {
             long long a = 0, b = 0;
-            if (!int_constant_value(e->left, a) || !int_constant_value(e->right, b)) return false;
+            if (!int_constant_value(e->kids().left, a) || !int_constant_value(e->kids().right, b)) return false;
             if (e->op == TokenType::PLUS) return !__builtin_add_overflow(a, b, &out);
             if (e->op == TokenType::MINUS) return !__builtin_sub_overflow(a, b, &out);
             if (e->op == TokenType::STAR) return !__builtin_mul_overflow(a, b, &out);
@@ -399,9 +578,9 @@ bool conversions_ok(const InstMap& insts, const FnInfo& fn, const std::vector<St
     for (const auto& s : body) {
         if (!s) continue;
         if (s->kind == StmtKind::For) {
-            auto lt = fn.local_types.find(s->loop_var);
+            auto lt = fn.local_types.find(s->aux().loop_var);
             if (lt != fn.local_types.end() && lt->second == NType::Float) {
-                why = "uses '" + user_visible_name(s->loop_var) + "' as a loop counter and also as a float; "
+                why = "uses '" + user_visible_name(s->aux().loop_var) + "' as a loop counter and also as a float; "
                       "native code would hold the counter in a double (use a different name for the float)";
                 return false;
             }
@@ -412,9 +591,9 @@ bool conversions_ok(const InstMap& insts, const FnInfo& fn, const std::vector<St
                   "a double, which is inexact above 2^53 (return a float on every path to enable native code)";
             return false;
         }
-        if (!conversions_ok(insts, fn, s->body, why) || !conversions_ok(insts, fn, s->then_body, why) ||
-            !conversions_ok(insts, fn, s->else_body, why)) return false;
-        for (const auto& el : s->elifs)
+        if (!conversions_ok(insts, fn, s->body, why) || !conversions_ok(insts, fn, s->aux().then_body, why) ||
+            !conversions_ok(insts, fn, s->aux().else_body, why)) return false;
+        for (const auto& el : s->aux().elifs)
             if (!conversions_ok(insts, fn, el.second, why)) return false;
     }
     return true;
@@ -423,21 +602,21 @@ bool conversions_ok(const InstMap& insts, const FnInfo& fn, const std::vector<St
 bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string& why) {
     auto pred = [&](const ExprPtr& n) -> bool {
         if (n->kind == ExprKind::Binary && n->op == TokenType::PERCENT) {
-            if (infer_expr_type(insts, fn, n->left) != NType::Int ||
-                infer_expr_type(insts, fn, n->right) != NType::Int) {
+            if (infer_expr_type(insts, fn, n->kids().left) != NType::Int ||
+                infer_expr_type(insts, fn, n->kids().right) != NType::Int) {
                 why = "uses '%' on a value that is not provably an int";
                 return false;
             }
         }
         if (n->kind == ExprKind::Binary && n->op == TokenType::SLASH) {
             if (infer_expr_type(insts, fn, n) == NType::Float &&
-                !definitely_float(insts, fn, n->left) && !definitely_float(insts, fn, n->right)) {
+                !definitely_float(insts, fn, n->kids().left) && !definitely_float(insts, fn, n->kids().right)) {
                 why = "divides by/with a variable that holds an int on some paths and a float on others "
                       "(the interpreter would do int division there) - initialise it with a float like 0.0 to enable native code";
                 return false;
             }
         }
-        if (n->kind == ExprKind::Index && infer_expr_type(insts, fn, n->index) != NType::Int) {
+        if (n->kind == ExprKind::Index && infer_expr_type(insts, fn, n->kids().index) != NType::Int) {
             why = "indexes an f64_array with a non-int value";
             return false;
         }
@@ -449,14 +628,14 @@ bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string
                   "like 0.0 to enable native code";
             return false;
         }
-        if (n->kind == ExprKind::CompoundAssign && n->target && n->target->kind == ExprKind::Ident) {
-            auto lt = fn.local_types.find(n->target->name);
+        if (n->kind == ExprKind::CompoundAssign && n->kids().target && n->kids().target->kind == ExprKind::Ident) {
+            auto lt = fn.local_types.find(n->kids().target->name);
             const NType tx = lt != fn.local_types.end() ? lt->second : NType::Int;
-            const NType tv = infer_expr_type(insts, fn, n->value);
+            const NType tv = infer_expr_type(insts, fn, n->kids().value);
             if (tx == NType::Float || tv == NType::Float) {
-                auto sn = fn.seen.find(n->target->name);
+                auto sn = fn.seen.find(n->kids().target->name);
                 const bool x_certain = tx == NType::Float && (sn == fn.seen.end() || (sn->second & 1) == 0);
-                if (!x_certain && !definitely_float(insts, fn, n->value)) {
+                if (!x_certain && !definitely_float(insts, fn, n->kids().value)) {
                     why = "updates a variable that holds an int on some paths and a float on others with += or -=; "
                           "native code would miss an integer overflow the interpreter reports - initialise it with "
                           "a float like 0.0 to enable native code";
@@ -464,32 +643,32 @@ bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string
                 }
             }
         }
-        if (n->kind == ExprKind::Assign && n->target && n->target->kind == ExprKind::Ident) {
-            auto lt = fn.local_types.find(n->target->name);
+        if (n->kind == ExprKind::Assign && n->kids().target && n->kids().target->kind == ExprKind::Ident) {
+            auto lt = fn.local_types.find(n->kids().target->name);
             if (lt != fn.local_types.end() && lt->second == NType::Float &&
-                infer_expr_type(insts, fn, n->value) == NType::Int && !small_int_constant(n->value)) {
-                why = "stores an int into '" + user_visible_name(n->target->name) + "', which is also used as a float; "
+                infer_expr_type(insts, fn, n->kids().value) == NType::Int && !small_int_constant(n->kids().value)) {
+                why = "stores an int into '" + user_visible_name(n->kids().target->name) + "', which is also used as a float; "
                       "native code would keep the int in a double, which is inexact above 2^53";
                 return false;
             }
         }
-        if (n->kind == ExprKind::Call && n->callee && n->callee->kind == ExprKind::Ident &&
-            !math_whitelist().count(n->callee->name)) {
+        if (n->kind == ExprKind::Call && n->kids().callee && n->kids().callee->kind == ExprKind::Ident &&
+            !builtin_call_name(n->kids().callee->name)) {
             std::string key;
             if (callee_key(insts, fn, n, key)) {
                 for (size_t gi : entry_guard_params(insts.at(key)))
-                    if (gi < n->args.size() && !small_int_constant(n->args[gi])) {
+                    if (gi < n->kids().args.size() && !small_int_constant(n->kids().args[gi])) {
                         why = "passes an int to a function that turns that parameter into a float; native code would "
                               "convert it to a double, which is inexact above 2^53";
                         return false;
                     }
             }
         }
-        if (n->kind == ExprKind::Call && n->callee && n->callee->kind == ExprKind::Ident) {
-            auto mit = math_whitelist().find(n->callee->name);
+        if (n->kind == ExprKind::Call && n->kids().callee && n->kids().callee->kind == ExprKind::Ident) {
+            auto mit = math_whitelist().find(n->kids().callee->name);
             if (mit != math_whitelist().end() && mit->second.kind == MathKind::Promote2 &&
                 infer_expr_type(insts, fn, n) == NType::Float && !definitely_float(insts, fn, n)) {
-                for (const auto& arg : n->args)
+                for (const auto& arg : n->kids().args)
                     if (infer_expr_type(insts, fn, arg) == NType::Int && !small_int_constant(arg)) {
                         why = "mixes an int into max/min with a variable that holds an int on some paths and a float "
                               "on others; native code would hold the int in a double, which is inexact above 2^53";
@@ -497,8 +676,8 @@ bool instance_expressions_ok(const InstMap& insts, const FnInfo& fn, std::string
                     }
             }
         }
-        if (n->kind == ExprKind::Call && n->callee && n->callee->kind == ExprKind::Ident &&
-            math_whitelist().count(n->callee->name) == 0) {
+        if (n->kind == ExprKind::Call && n->kids().callee && n->kids().callee->kind == ExprKind::Ident &&
+            !builtin_call_name(n->kids().callee->name)) {
             std::string key;
             if (!callee_key(insts, fn, n, key)) { why = "calls a function with the wrong number of arguments"; return false; }
         }
@@ -523,6 +702,11 @@ public:
         why_.clear();
         active_for_.clear();
         for (const auto& s : fn.decl->body) scan_stmt(s,  false);
+        if (ok_) {
+            int boolish = 0, other = 0;
+            count_return_kinds(fn.decl->body, boolish, other);
+            if (boolish > 0 && other > 0) fail("returns a boolean on some paths and a number on others");
+        }
         fn.calls_candidates = calls_;
         return ok_;
     }
@@ -545,84 +729,87 @@ private:
     bool fn_array_param(const std::string& name) const {
         return current_fn_ && current_fn_->array_params.count(name) != 0;
     }
+    bool fn_opaque_param(const std::string& name) const {
+        return current_fn_ && current_fn_->opaque_params.count(name) != 0;
+    }
 
     void scan_stmt(const StmtPtr& s, bool cond_ctx) {
         if (!ok_ || !s) return;
         switch (s->kind) {
             case StmtKind::VarDecl:
                 if (s->expr && s->expr->kind == ExprKind::Assign) {
-                    if (!s->expr->target) { fail(); return; }
-                    if (s->expr->target->kind == ExprKind::Index) scan_expr(s->expr->target, false);
-                    else if (s->expr->target->kind != ExprKind::Ident ||
-                             fn_array_param(s->expr->target->name)) {
+                    if (!s->expr->kids().target) { fail(); return; }
+                    if (s->expr->kids().target->kind == ExprKind::Index) scan_expr(s->expr->kids().target, false);
+                    else if (s->expr->kids().target->kind != ExprKind::Ident ||
+                             fn_array_param(s->expr->kids().target->name)) {
                         fail("assigns to something other than a plain number variable or an f64_array element");
                         return;
                     }
-                    scan_expr(s->expr->value, false);
+                    scan_expr(s->expr->kids().value, false);
                 } else {
                     fail("declaration that is not a plain assignment");
                 }
                 break;
             case StmtKind::ExprStmt:
                 if (s->expr && s->expr->kind == ExprKind::CompoundAssign) {
-                    if (!s->expr->target ||
-                        (s->expr->target->kind != ExprKind::Ident &&
-                         s->expr->target->kind != ExprKind::Index)) { fail(); return; }
+                    if (!s->expr->kids().target ||
+                        (s->expr->kids().target->kind != ExprKind::Ident &&
+                         s->expr->kids().target->kind != ExprKind::Index)) { fail(); return; }
                     if (s->expr->op != TokenType::PLUS_EQ && s->expr->op != TokenType::MINUS_EQ) {
                         fail("uses a compound assignment other than += or -=");
                         return;
                     }
-                    if (s->expr->target->kind == ExprKind::Index) {
-                        scan_expr(s->expr->target, false);
-                    } else if (fn_array_param(s->expr->target->name)) { fail(); return; }
-                    scan_expr(s->expr->value, false);
+                    if (s->expr->kids().target->kind == ExprKind::Index) {
+                        scan_expr(s->expr->kids().target, false);
+                    } else if (fn_array_param(s->expr->kids().target->name)) { fail(); return; }
+                    scan_expr(s->expr->kids().value, false);
                 } else if (s->expr && s->expr->kind == ExprKind::Assign &&
-                           s->expr->target && s->expr->target->kind == ExprKind::Index) {
-                    scan_expr(s->expr->target, false);
-                    scan_expr(s->expr->value, false);
+                           s->expr->kids().target && s->expr->kids().target->kind == ExprKind::Index) {
+                    scan_expr(s->expr->kids().target, false);
+                    scan_expr(s->expr->kids().value, false);
                 } else {
                     fail("has a bare call or output statement (e.g. bc::out, push): side effects are interpreted only");
                 }
                 break;
             case StmtKind::If:
                 scan_expr(s->cond, true);
-                for (const auto& bs : s->then_body) scan_stmt(bs, cond_ctx);
-                for (const auto& el : s->elifs) {
+                for (const auto& bs : s->aux().then_body) scan_stmt(bs, cond_ctx);
+                for (const auto& el : s->aux().elifs) {
                     scan_expr(el.first, true);
                     for (const auto& bs : el.second) scan_stmt(bs, cond_ctx);
                 }
-                for (const auto& bs : s->else_body) scan_stmt(bs, cond_ctx);
+                for (const auto& bs : s->aux().else_body) scan_stmt(bs, cond_ctx);
                 break;
             case StmtKind::While:
                 scan_expr(s->cond, true);
                 for (const auto& bs : s->body) scan_stmt(bs, cond_ctx);
                 break;
             case StmtKind::For: {
-                auto& it = s->iterable;
-                if (!it || it->kind != ExprKind::Call || !it->callee ||
-                    it->callee->kind != ExprKind::Ident || it->callee->name != "range" ||
-                    it->args.size() != 1) {
+                auto& it = s->aux().iterable;
+                if (!it || it->kind != ExprKind::Call || !it->kids().callee ||
+                    it->kids().callee->kind != ExprKind::Ident || it->kids().callee->name != "range" ||
+                    it->kids().args.size() != 1) {
                     fail("has a 'for' loop over something other than 'thru N' (e.g. a vector or string)");
                     return;
                 }
-                scan_expr(it->args[0], false);
+                scan_expr(it->kids().args[0], false);
                 for (const auto& v : active_for_)
-                    if (v == s->loop_var) {
+                    if (v == s->aux().loop_var) {
                         const std::string msg =
-                            "reuses the loop variable '" + user_visible_name(s->loop_var) +
+                            "reuses the loop variable '" + user_visible_name(s->aux().loop_var) +
                             "' in a loop nested inside another loop that already uses it; the interpreter shares "
                             "their hidden counters (the outer loop ends early), so native code would differ - "
                             "use a different name";
                         fail(msg.c_str());
                         return;
                     }
-                active_for_.push_back(s->loop_var);
+                active_for_.push_back(s->aux().loop_var);
                 for (const auto& bs : s->body) scan_stmt(bs, cond_ctx);
                 active_for_.pop_back();
                 break;
             }
             case StmtKind::Return:
-                if (s->ret_value) scan_expr(s->ret_value, false);
+                if (s->ret_value) scan_expr(s->ret_value, boolish_expr(s->ret_value));
                 break;
             case StmtKind::Break:
             case StmtKind::Continue:
@@ -643,6 +830,8 @@ private:
                 fail("uses a string");
                 break;
             case ExprKind::Bool:
+                if (!cond_ctx) fail("uses a bool or none value");
+                break;
             case ExprKind::None:
                 fail("uses a bool or none value");
                 break;
@@ -656,22 +845,23 @@ private:
                 fail("uses member access (bc::name or object.field)");
                 break;
             case ExprKind::Index:
-                if (!e->object || e->object->kind != ExprKind::Ident ||
-                    !fn_array_param(e->object->name)) {
-                    fail("indexes something that is not an f64_array parameter (vector, string or dict)");
+                if (!e->kids().object || e->kids().object->kind != ExprKind::Ident ||
+                    !fn_array_param(e->kids().object->name)) {
+                    fail("indexes something that is not a native array parameter");
                     return;
                 }
-                scan_expr(e->index, false);
+                scan_expr(e->kids().index, false);
                 break;
             case ExprKind::Ident:
                 if (fn_array_param(e->name)) fail("uses an f64_array as a plain value");
+                else if (fn_opaque_param(e->name)) fail("uses an interpreter value outside a fallback expression");
                 break;
             case ExprKind::Unary:
                 if (e->op == TokenType::NOT) {
                     if (!cond_ctx) { fail("uses a boolean (!) result as a number"); return; }
-                    scan_expr(e->operand, true);
+                    scan_expr(e->kids().operand, true);
                 } else if (e->op == TokenType::MINUS) {
-                    scan_expr(e->operand, false);
+                    scan_expr(e->kids().operand, false);
                 } else {
                     fail();
                 }
@@ -687,53 +877,77 @@ private:
                 if (is_bool_op) {
                     if (!cond_ctx) { fail("stores or returns a comparison/boolean result (only allowed as an if/while condition)"); return; }
                     bool operand_cond = (e->op == TokenType::AND || e->op == TokenType::OR);
-                    scan_expr(e->left, operand_cond);
-                    scan_expr(e->right, operand_cond);
+                    scan_expr(e->kids().left, operand_cond);
+                    scan_expr(e->kids().right, operand_cond);
                 } else if (is_arith_op) {
-                    scan_expr(e->left, false);
-                    scan_expr(e->right, false);
+                    scan_expr(e->kids().left, false);
+                    scan_expr(e->kids().right, false);
                 } else {
                     fail();
                 }
                 break;
             }
             case ExprKind::Call: {
-                if (!e->callee || e->callee->kind != ExprKind::Ident) {
-                    if (e->callee && e->callee->kind == ExprKind::Member && math_whitelist().count(e->callee->name)) {
-                        fail(("calls " + e->callee->name + " through a module alias while the program also declares its own '" +
-                              e->callee->name + "'; native code cannot tell the two apart").c_str());
-                    } else if (e->callee && e->callee->kind == ExprKind::Member) {
-                        std::string hint = e->callee->name == "len"
+                const bool qualified_int = e->kids().callee && e->kids().callee->kind == ExprKind::Member &&
+                    e->kids().callee->name == "int" && e->kids().callee->kids().object &&
+                    e->kids().callee->kids().object->kind == ExprKind::Ident && e->kids().callee->kids().object->name == "bc";
+                if (!e->kids().callee || (e->kids().callee->kind != ExprKind::Ident && !qualified_int)) {
+                    if (e->kids().callee && e->kids().callee->kind == ExprKind::Member && math_whitelist().count(e->kids().callee->name)) {
+                        fail(("calls " + e->kids().callee->name + " through a module alias while the program also declares its own '" +
+                              e->kids().callee->name + "'; native code cannot tell the two apart").c_str());
+                    } else if (e->kids().callee && e->kids().callee->kind == ExprKind::Member) {
+                        std::string hint = e->kids().callee->name == "len"
                             ? "; pass the length in as a number argument instead"
                             : "";
-                        fail(("calls '" + e->callee->name + "' through a module name, and it is not a whitelisted math builtin" + hint).c_str());
+                        fail(("calls '" + e->kids().callee->name + "' through a module name, and it is not a whitelisted math builtin" + hint).c_str());
                     } else {
                         fail();
                     }
                     return;
                 }
-                const std::string& name = e->callee->name;
+                const std::string& name = e->kids().callee->name;
+                if (name == kLenCall) {
+                    if (!e->aux().native_fallback_func.empty() && e->kids().args.size() == 1 &&
+                        e->kids().args[0] && e->kids().args[0]->kind == ExprKind::Ident &&
+                        fn_opaque_param(e->kids().args[0]->name)) return;
+                    if (e->kids().args.size() != 1 || !e->kids().args[0] || e->kids().args[0]->kind != ExprKind::Ident ||
+                        !fn_array_param(e->kids().args[0]->name)) {
+                        fail("calls len on a value that this function does not index as an f64_array parameter");
+                    }
+                    return;
+                }
                 auto mit = math_whitelist().find(name);
                 if (mit != math_whitelist().end()) {
+                    if (mit->second.kind == MathKind::ToInt) {
+                        if (e->kids().args.size() > 1) { fail(); return; }
+                    } else {
                     size_t want = (mit->second.kind == MathKind::AlwaysFloat1 || mit->second.kind == MathKind::Pred1) ? 1
                                 : mit->second.kind == MathKind::AlwaysFloat2 ? 2
                                 : mit->second.kind == MathKind::AlwaysFloat3 ? 3
                                 : 2;
-                    if (e->args.size() != want) { fail(); return; }
+                    if (e->kids().args.size() != want) { fail(); return; }
                     if (mit->second.kind == MathKind::Pred1 && !cond_ctx) {
                         fail("stores or returns a boolean result (only allowed as an if/while condition)");
                         return;
                     }
+                    }
                 } else if (candidates_.count(name)) {
                     calls_.insert(name);
                     const FnInfo& callee = candidates_.at(name);
-                    if (e->args.size() != callee.param_names.size()) { fail(); return; }
-                    for (size_t i = 0; i < e->args.size(); i++) {
+                    if (e->kids().args.size() != callee.param_names.size()) { fail(); return; }
+                    if (!cond_ctx && decl_returns_bool(callee.decl)) {
+                        fail("stores or returns a boolean result (only allowed as an if/while condition)");
+                        return;
+                    }
+                    for (size_t i = 0; i < e->kids().args.size(); i++) {
                         if (callee.array_params.count(callee.param_names[i])) {
-                            if (e->args[i]->kind != ExprKind::Ident ||
-                                !fn_array_param(e->args[i]->name)) { fail(); return; }
+                            if (e->kids().args[i]->kind != ExprKind::Ident ||
+                                !fn_array_param(e->kids().args[i]->name)) { fail(); return; }
+                        } else if (callee.opaque_params.count(callee.param_names[i])) {
+                            if (e->kids().args[i]->kind != ExprKind::Ident ||
+                                !fn_opaque_param(e->kids().args[i]->name)) { fail(); return; }
                         } else {
-                            scan_expr(e->args[i], false);
+                            scan_expr(e->kids().args[i], false);
                         }
                     }
                     return;
@@ -741,7 +955,7 @@ private:
                     fail(("calls '" + name + "', which is neither a native-eligible function nor a whitelisted math builtin").c_str());
                     return;
                 }
-                for (const auto& a : e->args) scan_expr(a, false);
+                for (const auto& a : e->kids().args) scan_expr(a, false);
                 break;
             }
             case ExprKind::Assign:
@@ -757,11 +971,11 @@ bool always_returns(const std::vector<StmtPtr>& body) {
         if (!s) continue;
         if (s->kind == StmtKind::Return) return true;
         if (s->kind == StmtKind::If) {
-            if (s->else_body.empty()) continue;
-            if (!always_returns(s->then_body)) continue;
-            bool all_elifs_return = std::all_of(s->elifs.begin(), s->elifs.end(),
+            if (s->aux().else_body.empty()) continue;
+            if (!always_returns(s->aux().then_body)) continue;
+            bool all_elifs_return = std::all_of(s->aux().elifs.begin(), s->aux().elifs.end(),
                 [](const std::pair<ExprPtr, std::vector<StmtPtr>>& el) { return always_returns(el.second); });
-            if (all_elifs_return && always_returns(s->else_body)) return true;
+            if (all_elifs_return && always_returns(s->aux().else_body)) return true;
         }
     }
     return false;
@@ -789,6 +1003,8 @@ public:
             const std::string& p = fn.param_names[i];
             switch (sig[i]) {
                 case 'A': fn.local_types[p] = NType::Array; break;
+                case 'J': fn.local_types[p] = NType::I64Array; break;
+                case 'O': fn.local_types[p] = NType::Opaque; break;
                 case 'I': fn.local_types[p] = NType::Int;   fn.seen[p] = 1; break;
                 case 'F': fn.local_types[p] = NType::Float; fn.seen[p] = 2; break;
                 default:  fn.local_types[p] = NType::Float; fn.seen[p] = 3; break;
@@ -824,21 +1040,21 @@ private:
             if (!s) continue;
             switch (s->kind) {
                 case StmtKind::VarDecl:
-                    if (s->expr && s->expr->kind == ExprKind::Assign && s->expr->target &&
-                        s->expr->target->kind == ExprKind::Ident) {
-                        out.emplace(s->expr->target->name, NType::Int);
+                    if (s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target &&
+                        s->expr->kids().target->kind == ExprKind::Ident) {
+                        out.emplace(s->expr->kids().target->name, NType::Int);
                     }
                     break;
                 case StmtKind::If:
-                    collect_locals(s->then_body, out);
-                    for (const auto& el : s->elifs) collect_locals(el.second, out);
-                    collect_locals(s->else_body, out);
+                    collect_locals(s->aux().then_body, out);
+                    for (const auto& el : s->aux().elifs) collect_locals(el.second, out);
+                    collect_locals(s->aux().else_body, out);
                     break;
                 case StmtKind::While:
                     collect_locals(s->body, out);
                     break;
                 case StmtKind::For:
-                    out.emplace(s->loop_var, NType::Int);
+                    out.emplace(s->aux().loop_var, NType::Int);
                     collect_locals(s->body, out);
                     break;
                 default:
@@ -860,8 +1076,8 @@ private:
 
     void discover(FnInfo& fn, const ExprPtr& e) {
         expr_tree_all(e, [&](const ExprPtr& n) {
-            if (n->kind == ExprKind::Call && n->callee && n->callee->kind == ExprKind::Ident &&
-                math_whitelist().count(n->callee->name) == 0) {
+            if (n->kind == ExprKind::Call && n->kids().callee && n->kids().callee->kind == ExprKind::Ident &&
+                !builtin_call_name(n->kids().callee->name)) {
                 std::string key, base, sig;
                 if (callee_key(insts_, fn, n, key, &base, &sig)) ensure(base, sig);
             }
@@ -872,39 +1088,39 @@ private:
     void propagate_stmt(FnInfo& fn, const StmtPtr& s) {
         if (!s) return;
         discover(fn, s->expr); discover(fn, s->cond); discover(fn, s->ret_value);
-        discover(fn, s->kind == StmtKind::For && s->iterable && !s->iterable->args.empty()
-                         ? s->iterable->args[0] : s->iterable);
-        for (const auto& el : s->elifs) discover(fn, el.first);
+        discover(fn, s->kind == StmtKind::For && s->aux().iterable && !s->aux().iterable->kids().args.empty()
+                         ? s->aux().iterable->kids().args[0] : s->aux().iterable);
+        for (const auto& el : s->aux().elifs) discover(fn, el.first);
         switch (s->kind) {
             case StmtKind::VarDecl:
-                if (s->expr && s->expr->kind == ExprKind::Assign && s->expr->target &&
-                    s->expr->target->kind == ExprKind::Ident) {
-                    const NType t = type_of(fn, s->expr->value);
-                    assign(fn, s->expr->target->name, t, definitely_float(insts_, fn, s->expr->value));
+                if (s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target &&
+                    s->expr->kids().target->kind == ExprKind::Ident) {
+                    const NType t = type_of(fn, s->expr->kids().value);
+                    assign(fn, s->expr->kids().target->name, t, definitely_float(insts_, fn, s->expr->kids().value));
                 }
                 break;
             case StmtKind::ExprStmt:
-                if (s->expr && s->expr->kind == ExprKind::CompoundAssign && s->expr->target &&
-                    s->expr->target->kind == ExprKind::Ident) {
-                    const std::string& name = s->expr->target->name;
+                if (s->expr && s->expr->kind == ExprKind::CompoundAssign && s->expr->kids().target &&
+                    s->expr->kids().target->kind == ExprKind::Ident) {
+                    const std::string& name = s->expr->kids().target->name;
                     const NType tx = fn.local_types.count(name) ? fn.local_types[name] : NType::Int;
-                    const NType tv = type_of(fn, s->expr->value);
+                    const NType tv = type_of(fn, s->expr->kids().value);
                     const NType t = (tx == NType::Float || tv == NType::Float) ? NType::Float : NType::Int;
                     const bool x_certain = tx == NType::Float && (fn.seen[name] & 1) == 0;
-                    assign(fn, name, t, x_certain || definitely_float(insts_, fn, s->expr->value));
+                    assign(fn, name, t, x_certain || definitely_float(insts_, fn, s->expr->kids().value));
                 }
                 break;
             case StmtKind::If:
-                for (const auto& bs : s->then_body) propagate_stmt(fn, bs);
-                for (const auto& el : s->elifs)
+                for (const auto& bs : s->aux().then_body) propagate_stmt(fn, bs);
+                for (const auto& el : s->aux().elifs)
                     for (const auto& bs : el.second) propagate_stmt(fn, bs);
-                for (const auto& bs : s->else_body) propagate_stmt(fn, bs);
+                for (const auto& bs : s->aux().else_body) propagate_stmt(fn, bs);
                 break;
             case StmtKind::While:
                 for (const auto& bs : s->body) propagate_stmt(fn, bs);
                 break;
             case StmtKind::For:
-                assign(fn, s->loop_var, NType::Int, false);
+                assign(fn, s->aux().loop_var, NType::Int, false);
                 for (const auto& bs : s->body) propagate_stmt(fn, bs);
                 break;
             case StmtKind::Return:
@@ -926,8 +1142,8 @@ bool has_bare_return(const std::vector<StmtPtr>& body) {
     for (const auto& s : body) {
         if (!s) continue;
         if (s->kind == StmtKind::Return && !s->ret_value) return true;
-        if (has_bare_return(s->body) || has_bare_return(s->then_body) || has_bare_return(s->else_body)) return true;
-        for (const auto& el : s->elifs) if (has_bare_return(el.second)) return true;
+        if (has_bare_return(s->body) || has_bare_return(s->aux().then_body) || has_bare_return(s->aux().else_body)) return true;
+        for (const auto& el : s->aux().elifs) if (has_bare_return(el.second)) return true;
     }
     return false;
 }
@@ -935,7 +1151,8 @@ bool has_bare_return(const std::vector<StmtPtr>& body) {
 
 class CCodeGen {
 public:
-    explicit CCodeGen(InstMap& insts) : fns_(insts) {}
+    CCodeGen(InstMap& insts, const std::unordered_map<std::string, int>& fallback_indices)
+        : fns_(insts), fallback_indices_(fallback_indices) {}
 
     std::string generate(const std::vector<std::string>& emit_order,
                          const std::vector<std::string>& exported) {
@@ -963,7 +1180,7 @@ public:
         for (const auto& key : exported) {
             const FnInfo& f = fns_.at(key);
             out << "  {\"" << c_escape(f.base_name) << "\", \"" << f.sig << "\", csy_entry" << f.id << ", "
-                << (f.return_type == NType::Float ? 1 : 0) << "},\n";
+                << (f.return_type == NType::Float ? 1 : (decl_returns_bool(f.decl) ? 2 : 0)) << "},\n";
         }
         out << "  {0, 0, 0, 0}\n};\n";
         out << "const int csy_entry_count = " << exported.size() << ";\n";
@@ -976,13 +1193,35 @@ public:
         }
         out << "  {0, 0, 0, 0, 0}\n};\n";
         out << "const int csy_global_count = " << exported.size() << ";\n";
+        out << "typedef struct { const char* func; const char* file; int line; int col; } CsySiteRow;\n";
+        out << "const CsySiteRow csy_site_table[] = {\n";
+        for (const auto& rec : sites_) {
+            out << "  {\"" << c_escape(rec.func) << "\", \"" << c_escape(rec.file) << "\", "
+                << rec.line << ", " << rec.col << "},\n";
+        }
+        out << "  {0, 0, 0, 0}\n};\n";
+        out << "const int csy_site_count = " << sites_.size() << ";\n";
         return out.str();
     }
 
 private:
     InstMap& fns_;
+    const std::unordered_map<std::string, int>& fallback_indices_;
     size_t temp_id_ = 0;
     std::unordered_map<const Expr*, size_t> call_tag_ids_;
+    struct SiteRec { std::string func, file; int line = 0, col = 0; };
+    std::vector<SiteRec> sites_;
+
+    std::string site_id(const FnInfo& fn, const NodeTok& tok) {
+        if (sites_.size() >= (1u << 22)) return "0";
+        SiteRec rec;
+        rec.func = fn.base_name;
+        if (tok.file_ptr) rec.file = *tok.file_ptr;
+        rec.line = tok.line;
+        rec.col = tok.col;
+        sites_.push_back(std::move(rec));
+        return std::to_string(sites_.size());
+    }
 
     bool has_dynamic_tag(const FnInfo& fn, const std::string& name) const {
         auto it = fn.seen.find(name);
@@ -998,8 +1237,8 @@ private:
     bool has_dynamic_call_tag(FnInfo& fn, const ExprPtr& e) {
         bool found = false;
         expr_tree_all(e, [&](const ExprPtr& node) {
-            if (node && node->kind == ExprKind::Call && node->callee && node->callee->kind == ExprKind::Ident &&
-                !math_whitelist().count(node->callee->name)) {
+            if (node && node->kind == ExprKind::Call && node->kids().callee && node->kids().callee->kind == ExprKind::Ident &&
+                !builtin_call_name(node->kids().callee->name)) {
                 std::string key;
                 if (callee_key(fns_, fn, node, key) && returns_maybe_int(fns_.at(key))) found = true;
             }
@@ -1013,7 +1252,9 @@ private:
         for (char c : s) { if (c == '"' || c == '\\') r += '\\'; r += c; }
         return r;
     }
-    static std::string c_type(NType t) { return t == NType::Float ? "double" : "long long"; }
+    static std::string c_type(NType t) {
+        return t == NType::Float ? "double" : t == NType::Opaque ? "void*" : "long long";
+    }
     static std::string vname(const std::string& n) { return "v_" + n; }
     static std::string fname(const FnInfo& f) { return "csy_fn" + std::to_string(f.id); }
 
@@ -1024,28 +1265,37 @@ private:
             const std::string& p = fn.param_names[i];
             switch (fn.sig[i]) {
                 case 'A': s << "double* p_" << p << ", long long plen_" << p << ", "; break;
+                case 'J': s << "long long* p_" << p << ", long long plen_" << p << ", "; break;
+                case 'O': s << "void* p_" << p << ", "; break;
                 case 'I': s << "long long p_" << p << ", "; break;
                 case 'M': s << "double p_" << p << ", int p_tag_" << p << ", "; break;
                 default:  s << "double p_" << p << ", "; break;
             }
         }
-        s << "int __depth, int* __err, int* __rtag)";
+        s << "void* __ctx, CsyNativeFallback __fallback, int __depth, int* __err";
+        if (returns_maybe_int(fn)) s << ", int* __rtag";
+        s << ")";
         return s.str();
     }
 
     void emit_entry(std::ostringstream& out, const FnInfo& fn) {
         out << "static void csy_entry" << fn.id << "(const CsyNativeArg* a, int* err, int* rtag, CsyRet* out) {\n";
+        out << "  void* ctx = " << (fn.param_names.empty() ? "0" : "a[0].context") << ";\n";
+        out << "  CsyNativeFallback fallback = " << (fn.param_names.empty() ? "0" : "a[0].fallback") << ";\n";
         for (size_t gi : entry_guard_params(fn))
             out << "  if (a[" << gi << "].ival >= 9007199254740992LL || a[" << gi << "].ival <= -9007199254740992LL) { *err = 5; return; }\n";
         out << "  " << c_type(fn.return_type) << " r = " << fname(fn) << "(";
         for (size_t i = 0; i < fn.param_names.size(); i++) {
             switch (fn.sig[i]) {
                 case 'A': out << "a[" << i << "].data, a[" << i << "].length, "; break;
+                case 'J': out << "a[" << i << "].idata, a[" << i << "].length, "; break;
+                case 'O': out << "(void*)a[" << i << "].opaque, "; break;
                 case 'I': out << "a[" << i << "].ival, "; break;
                 default:  out << "a[" << i << "].number, "; break;
             }
         }
-        out << "0, err, rtag);\n";
+        out << "ctx, fallback, 0, err" << (returns_maybe_int(fn) ? ", rtag" : "") << ");\n";
+        if (fn.return_type == NType::Float && !returns_maybe_int(fn)) out << "  if (!*err) *rtag = 1;\n";
         out << (fn.return_type == NType::Float ? "  out->f = r;\n" : "  out->i = r;\n");
         out << "}\n\n";
     }
@@ -1053,12 +1303,11 @@ private:
     void emit_function(std::ostringstream& out, FnInfo& fn) {
         call_tag_ids_.clear();
         out << signature(fn) << " {\n";
-        out << "  if (__depth > CSY_MAX_NATIVE_DEPTH) { *__err = 2; return 0; }\n";
-        out << "  int __dummy_tag = 0; (void)__dummy_tag; (void)__rtag;\n";
+        out << "  if (__depth >= CSY_MAX_NATIVE_DEPTH) { *__err = 2; return 0; }\n";
         all_stmt_exprs(fn.decl->body, [&](const ExprPtr& e) {
             expr_tree_all(e, [&](const ExprPtr& node) {
-                if (node && node->kind == ExprKind::Call && node->callee && node->callee->kind == ExprKind::Ident &&
-                    !math_whitelist().count(node->callee->name)) {
+                if (node && node->kind == ExprKind::Call && node->kids().callee && node->kids().callee->kind == ExprKind::Ident &&
+                    !builtin_call_name(node->kids().callee->name)) {
                     std::string key;
                     if (callee_key(fns_, fn, node, key) && returns_maybe_int(fns_.at(key))) call_tag_name(node);
                 }
@@ -1073,9 +1322,12 @@ private:
         for (size_t i = 0; i < fn.param_names.size(); i++) {
             const std::string& p = fn.param_names[i];
             const NType t = fn.local_types.at(p);
-            if (t == NType::Array) {
-                out << "  double* " << vname(p) << " = p_" << p << ";\n";
+            if (is_array_type(t)) {
+                out << "  " << (t == NType::Array ? "double*" : "long long*") << " "
+                    << vname(p) << " = p_" << p << ";\n";
                 out << "  long long len_" << p << " = plen_" << p << ";\n";
+            } else if (t == NType::Opaque) {
+                out << "  void* " << vname(p) << " = p_" << p << ";\n";
             } else {
                 out << "  " << c_type(t) << " " << vname(p) << " = (" << c_type(t) << ")p_" << p << ";\n";
                 if (has_dynamic_tag(fn, p)) {
@@ -1098,121 +1350,328 @@ private:
 
     std::string truthy(FnInfo& fn, const ExprPtr& e) { return "((" + expr(fn, e) + ") != 0)"; }
 
+    static bool can_fail(const std::string& code) { return code.find("__err") != std::string::npos; }
+
+    std::unordered_set<const Expr*> fast_index_;
+
+    struct LoopScan {
+        std::set<std::string> assigned;
+        std::vector<const Expr*> indexed;
+        bool ok = true;
+    };
+
+    struct Affine { bool ok = false; bool dep = false; };
+
+    void scan_loop_body(const std::vector<StmtPtr>& body, LoopScan& scan) {
+        auto collect = [&](const ExprPtr& e) {
+            expr_tree_all(e, [&](const ExprPtr& n) {
+                if (n && n->kind == ExprKind::Index) scan.indexed.push_back(n.get());
+                return true;
+            });
+        };
+        for (const auto& st : body) {
+            if (!st) continue;
+            switch (st->kind) {
+                case StmtKind::VarDecl:
+                case StmtKind::ExprStmt: {
+                    if (!st->expr) { scan.ok = false; break; }
+                    const auto& t = st->expr->kids().target;
+                    if (t && t->kind == ExprKind::Ident) scan.assigned.insert(t->name);
+                    collect(st->expr);
+                    break;
+                }
+                case StmtKind::If:
+                    collect(st->cond);
+                    scan_loop_body(st->aux().then_body, scan);
+                    for (const auto& el : st->aux().elifs) { collect(el.first); scan_loop_body(el.second, scan); }
+                    scan_loop_body(st->aux().else_body, scan);
+                    break;
+                case StmtKind::Return:
+                    collect(st->ret_value);
+                    break;
+                case StmtKind::Break:
+                case StmtKind::Continue:
+                    break;
+                default:
+                    scan.ok = false;
+                    break;
+            }
+        }
+    }
+
+    Affine affine_of(FnInfo& fn, const ExprPtr& e, const std::string& lv, const std::set<std::string>& assigned) {
+        Affine r;
+        if (!e || infer_expr_type(fns_, fn, e) != NType::Int) return r;
+        switch (e->kind) {
+            case ExprKind::Int:
+                r.ok = true;
+                return r;
+            case ExprKind::Ident:
+                if (e->name == lv) { r.ok = true; r.dep = true; return r; }
+                if (assigned.count(e->name)) return r;
+                r.ok = true;
+                return r;
+            case ExprKind::Unary: {
+                if (e->op != TokenType::MINUS) return r;
+                return affine_of(fn, e->kids().operand, lv, assigned);
+            }
+            case ExprKind::Binary: {
+                if (e->op != TokenType::PLUS && e->op != TokenType::MINUS && e->op != TokenType::STAR) return r;
+                const Affine l = affine_of(fn, e->kids().left, lv, assigned);
+                const Affine rr = affine_of(fn, e->kids().right, lv, assigned);
+                if (!l.ok || !rr.ok) return r;
+                if (e->op == TokenType::STAR && l.dep && rr.dep) return r;
+                r.ok = true;
+                r.dep = l.dep || rr.dep;
+                return r;
+            }
+            default:
+                return r;
+        }
+    }
+
+    std::string plain_index(const ExprPtr& e) {
+        switch (e->kind) {
+            case ExprKind::Int: return std::to_string(e->int_val) + "LL";
+            case ExprKind::Ident: return vname(e->name);
+            case ExprKind::Unary: return "(-(" + plain_index(e->kids().operand) + "))";
+            default: {
+                const char* op = e->op == TokenType::PLUS ? "+" : e->op == TokenType::MINUS ? "-" : "*";
+                return "(" + plain_index(e->kids().left) + " " + op + " " + plain_index(e->kids().right) + ")";
+            }
+        }
+    }
+
+    std::string checked_eval(const ExprPtr& e, const std::string& lv, const std::string& ctr_value,
+                             const std::string& ok, std::ostringstream& pre, size_t& tmp_id) {
+        switch (e->kind) {
+            case ExprKind::Int: return std::to_string(e->int_val) + "LL";
+            case ExprKind::Ident: return e->name == lv ? ctr_value : vname(e->name);
+            case ExprKind::Unary: {
+                const std::string x = checked_eval(e->kids().operand, lv, ctr_value, ok, pre, tmp_id);
+                const std::string t = "__vt" + std::to_string(tmp_id++);
+                pre << "long long " << t << "; " << ok << " &= !__builtin_sub_overflow(0LL, " << x << ", &" << t << ");\n";
+                return t;
+            }
+            default: {
+                const std::string l = checked_eval(e->kids().left, lv, ctr_value, ok, pre, tmp_id);
+                const std::string r = checked_eval(e->kids().right, lv, ctr_value, ok, pre, tmp_id);
+                const char* fn_name = e->op == TokenType::PLUS ? "__builtin_add_overflow" :
+                                      e->op == TokenType::MINUS ? "__builtin_sub_overflow" : "__builtin_mul_overflow";
+                const std::string t = "__vt" + std::to_string(tmp_id++);
+                pre << "long long " << t << "; " << ok << " &= !" << fn_name << "(" << l << ", " << r << ", &" << t << ");\n";
+                return t;
+            }
+        }
+    }
+
+    bool plan_versioned_loop(FnInfo& fn, const StmtPtr& s, const std::string& bound, size_t id,
+                             std::string& preheader, std::string& ok_name) {
+        const std::string lv_name = s->aux().loop_var;
+        LoopScan scan;
+        scan_loop_body(s->body, scan);
+        if (!scan.ok || scan.assigned.count(lv_name)) return false;
+        struct Access { const Expr* node; std::string array; std::string plain; };
+        std::vector<Access> accesses;
+        std::set<const Expr*> seen_nodes;
+        for (const Expr* idx : scan.indexed) {
+            if (!seen_nodes.insert(idx).second) continue;
+            const auto& obj = idx->kids().object;
+            if (!obj || obj->kind != ExprKind::Ident || scan.assigned.count(obj->name)) continue;
+            if (!is_array_type(infer_expr_type(fns_, fn, obj))) continue;
+            if (!affine_of(fn, idx->kids().index, lv_name, scan.assigned).ok) continue;
+            accesses.push_back({idx, obj->name, plain_index(idx->kids().index)});
+        }
+        if (accesses.empty()) return false;
+        ok_name = "__vok" + std::to_string(id);
+        std::ostringstream pre;
+        pre << "int " << ok_name << " = (*__err == 0);\n";
+        pre << "if (" << bound << " > 0) {\n";
+        size_t tmp_id = 0;
+        std::set<std::string> done;
+        const std::string last = "(" + bound + " - 1)";
+        for (const auto& a : accesses) {
+            const std::string key = a.array + "|" + a.plain;
+            if (!done.insert(key).second) continue;
+            const ExprPtr index_expr = a.node->kids().index;
+            const std::string first_v = checked_eval(index_expr, lv_name, "0LL", ok_name, pre, tmp_id);
+            const std::string last_v = checked_eval(index_expr, lv_name, last, ok_name, pre, tmp_id);
+            pre << ok_name << " &= (" << first_v << " >= 0) & (" << first_v << " < len_" << a.array << ") & ("
+                << last_v << " >= 0) & (" << last_v << " < len_" << a.array << ");\n";
+        }
+        pre << "}\n";
+        preheader = pre.str();
+        for (const auto& a : accesses) fast_index_.insert(a.node);
+        return true;
+    }
+
+    std::string fast_set_text(FnInfo& fn, const ExprPtr& target, const std::string& value_text, int op_kind) {
+        const bool int_array = infer_expr_type(fns_, fn, target->kids().object) == NType::I64Array;
+        const std::string elem = vname(target->kids().object->name) + "[" + plain_index(target->kids().index) + "]";
+        const char* assign = op_kind == 0 ? " = " : op_kind == 1 ? " += " : " -= ";
+        const std::string type = int_array ? "long long" : "double";
+        if (can_fail(value_text))
+            return "{ " + type + " __fv = (" + value_text + "); if (!*__err) " + elem + assign + "__fv; }\n";
+        return elem + assign + "(" + value_text + ");\n";
+    }
+
+
+    void emit_checked(std::ostringstream& out, const std::string& text, int depth) {
+        out << text;
+        if (can_fail(text)) { indent(out, depth); out << "if (*__err) return 0;\n"; }
+    }
+
     void emit_stmt(std::ostringstream& out, FnInfo& fn, const StmtPtr& s, int depth) {
         if (!s) return;
         switch (s->kind) {
-            case StmtKind::VarDecl:
-                indent(out, depth);
-                if (s->expr->target->kind == ExprKind::Index) {
-                    const auto& target = s->expr->target;
-                    out << "csy_array_set(" << vname(target->object->name) << ", len_" << target->object->name
-                        << ", (long long)(" << expr(fn, target->index) << "), "
-                        << expr(fn, s->expr->value) << ", __err);\n";
+            case StmtKind::VarDecl: {
+                std::ostringstream body;
+                indent(body, depth);
+                if (s->expr->kids().target->kind == ExprKind::Index && fast_index_.count(s->expr->kids().target.get())) {
+                    body << fast_set_text(fn, s->expr->kids().target, expr(fn, s->expr->kids().value), 0);
+                } else if (s->expr->kids().target->kind == ExprKind::Index) {
+                    const auto& target = s->expr->kids().target;
+                    const bool int_array = infer_expr_type(fns_, fn, target->kids().object) == NType::I64Array;
+                    body << (int_array ? "csy_i64_array_set(" : "csy_array_set(")
+                        << vname(target->kids().object->name) << ", len_" << target->kids().object->name
+                        << ", (long long)(" << expr(fn, target->kids().index) << "), "
+                        << expr(fn, s->expr->kids().value) << ", __err, " << site_id(fn, target->tok) << ");\n";
                 } else {
-                    const std::string& target = s->expr->target->name;
-                    out << vname(target) << " = " << expr(fn, s->expr->value) << ";\n";
+                    const std::string& target = s->expr->kids().target->name;
+                    body << vname(target) << " = " << expr(fn, s->expr->kids().value) << ";\n";
                     if (has_dynamic_tag(fn, target))
-                        out << "  " << tag_name(target) << " = " << tag_expr(fn, s->expr->value) << ";\n";
+                        body << "  " << tag_name(target) << " = " << tag_expr(fn, s->expr->kids().value) << ";\n";
                 }
-                indent(out, depth); out << "if (*__err) return 0;\n";
+                emit_checked(out, body.str(), depth);
                 break;
+            }
             case StmtKind::ExprStmt: {
-                indent(out, depth);
-                if (s->expr->kind == ExprKind::Assign) {
-                    const auto& target = s->expr->target;
-                    out << "csy_array_set(" << vname(target->object->name) << ", len_" << target->object->name
-                        << ", (long long)(" << expr(fn, target->index) << "), "
-                        << expr(fn, s->expr->value) << ", __err);\n";
-                } else if (s->expr->target->kind == ExprKind::Index) {
-                    const auto& target = s->expr->target;
-                    out << "csy_array_compound(" << vname(target->object->name) << ", len_"
-                        << target->object->name << ", (long long)(" << expr(fn, target->index)
-                        << "), " << expr(fn, s->expr->value) << ", "
-                        << (s->expr->op == TokenType::MINUS_EQ ? "1" : "0") << ", __err);\n";
+                std::ostringstream body;
+                indent(body, depth);
+                if (s->expr->kind == ExprKind::Assign && fast_index_.count(s->expr->kids().target.get())) {
+                    body << fast_set_text(fn, s->expr->kids().target, expr(fn, s->expr->kids().value), 0);
+                } else if (s->expr->kind != ExprKind::Assign && s->expr->kids().target->kind == ExprKind::Index &&
+                           fast_index_.count(s->expr->kids().target.get()) &&
+                           infer_expr_type(fns_, fn, s->expr->kids().target->kids().object) == NType::Array) {
+                    body << fast_set_text(fn, s->expr->kids().target, expr(fn, s->expr->kids().value),
+                                          s->expr->op == TokenType::MINUS_EQ ? 2 : 1);
+                } else if (s->expr->kind == ExprKind::Assign) {
+                    const auto& target = s->expr->kids().target;
+                    const bool int_array = infer_expr_type(fns_, fn, target->kids().object) == NType::I64Array;
+                    body << (int_array ? "csy_i64_array_set(" : "csy_array_set(")
+                        << vname(target->kids().object->name) << ", len_" << target->kids().object->name
+                        << ", (long long)(" << expr(fn, target->kids().index) << "), "
+                        << expr(fn, s->expr->kids().value) << ", __err, " << site_id(fn, target->tok) << ");\n";
+                } else if (s->expr->kids().target->kind == ExprKind::Index) {
+                    const auto& target = s->expr->kids().target;
+                    const bool int_array = infer_expr_type(fns_, fn, target->kids().object) == NType::I64Array;
+                    body << (int_array ? "csy_i64_array_compound(" : "csy_array_compound(")
+                        << vname(target->kids().object->name) << ", len_"
+                        << target->kids().object->name << ", (long long)(" << expr(fn, target->kids().index)
+                        << "), " << expr(fn, s->expr->kids().value) << ", "
+                        << (s->expr->op == TokenType::MINUS_EQ ? "1" : "0") << ", __err, "
+                        << site_id(fn, s->expr->tok) << ");\n";
                 } else {
-                    const std::string target = vname(s->expr->target->name);
+                    const std::string target = vname(s->expr->kids().target->name);
                     const TokenType op = s->expr->op == TokenType::PLUS_EQ ? TokenType::PLUS : TokenType::MINUS;
-                    if (infer_expr_type(fns_, fn, s->expr->target) == NType::Int) {
-                        out << target << " = " << safe_integer_arithmetic(op, target, expr(fn, s->expr->value)) << ";\n";
+                    if (infer_expr_type(fns_, fn, s->expr->kids().target) == NType::Int) {
+                        body << target << " = " << safe_integer_arithmetic(op, target, expr(fn, s->expr->kids().value), site_id(fn, s->expr->tok)) << ";\n";
                     } else {
-                        out << target << (op == TokenType::PLUS ? " += " : " -= ")
-                            << expr(fn, s->expr->value) << ";\n";
+                        body << target << (op == TokenType::PLUS ? " += " : " -= ")
+                            << expr(fn, s->expr->kids().value) << ";\n";
                     }
-                    if (has_dynamic_tag(fn, s->expr->target->name)) {
+                    if (has_dynamic_tag(fn, s->expr->kids().target->name)) {
                         auto result = std::make_shared<Expr>();
                         result->kind = ExprKind::Binary;
                         result->op = op;
-                        result->left = s->expr->target;
-                        result->right = s->expr->value;
-                        out << "  " << tag_name(s->expr->target->name) << " = " << tag_expr(fn, result) << ";\n";
+                        result->kids_mut().left = s->expr->kids_mut().target;
+                        result->kids_mut().right = s->expr->kids_mut().value;
+                        body << "  " << tag_name(s->expr->kids().target->name) << " = " << tag_expr(fn, result) << ";\n";
                     }
                 }
-                indent(out, depth); out << "if (*__err) return 0;\n";
+                emit_checked(out, body.str(), depth);
                 break;
             }
             case StmtKind::If: {
                 const std::string cond = "__csy_cond_" + std::to_string(temp_id_++);
+                const std::string cond_expr = truthy(fn, s->cond);
                 indent(out, depth);
-                out << "{ int " << cond << " = " << truthy(fn, s->cond) << ";\n";
-                indent(out, depth + 1); out << "if (*__err) return 0;\n";
+                out << "{ int " << cond << " = " << cond_expr << ";\n";
+                if (can_fail(cond_expr)) { indent(out, depth + 1); out << "if (*__err) return 0;\n"; }
                 indent(out, depth + 1); out << "if (" << cond << ") {\n";
-                for (const auto& bs : s->then_body) emit_stmt(out, fn, bs, depth + 1);
+                for (const auto& bs : s->aux().then_body) emit_stmt(out, fn, bs, depth + 1);
                 indent(out, depth + 1); out << "}";
-                for (const auto& el : s->elifs) {
+                for (const auto& el : s->aux().elifs) {
                     const std::string elif_cond = "__csy_cond_" + std::to_string(temp_id_++);
-                    out << " else { int " << elif_cond << " = " << truthy(fn, el.first) << ";\n";
-                    indent(out, depth + 2); out << "if (*__err) return 0;\n";
+                    const std::string elif_expr = truthy(fn, el.first);
+                    out << " else { int " << elif_cond << " = " << elif_expr << ";\n";
+                    if (can_fail(elif_expr)) { indent(out, depth + 2); out << "if (*__err) return 0;\n"; }
                     indent(out, depth + 2); out << "if (" << elif_cond << ") {\n";
                     for (const auto& bs : el.second) emit_stmt(out, fn, bs, depth + 1);
                     indent(out, depth + 2); out << "}";
                 }
-                if (!s->else_body.empty()) {
+                if (!s->aux().else_body.empty()) {
                     out << " else {\n";
-                    for (const auto& bs : s->else_body) emit_stmt(out, fn, bs, depth + 1);
+                    for (const auto& bs : s->aux().else_body) emit_stmt(out, fn, bs, depth + 1);
                     indent(out, depth + 2); out << "}";
                 }
-                for (size_t i = 0; i < s->elifs.size(); i++) out << " }";
+                for (size_t i = 0; i < s->aux().elifs.size(); i++) out << " }";
                 out << " }\n";
                 break;
             }
             case StmtKind::While: {
                 const size_t id = temp_id_++;
                 indent(out, depth); out << "while (1) {\n";
+                const std::string while_expr = truthy(fn, s->cond);
                 indent(out, depth + 1);
-                out << "int __csy_cond_" << id << " = " << truthy(fn, s->cond) << ";\n";
-                indent(out, depth + 1); out << "if (*__err) return 0;\n";
+                out << "int __csy_cond_" << id << " = " << while_expr << ";\n";
+                if (can_fail(while_expr)) { indent(out, depth + 1); out << "if (*__err) return 0;\n"; }
                 indent(out, depth + 1); out << "if (!__csy_cond_" << id << ") break;\n";
                 for (const auto& bs : s->body) emit_stmt(out, fn, bs, depth + 1);
                 indent(out, depth); out << "}\n";
                 break;
             }
             case StmtKind::For: {
-                const std::string lv = vname(s->loop_var);
+                const std::string lv = vname(s->aux().loop_var);
                 const size_t id = temp_id_++;
                 const std::string bound = "__csy_bound_" + std::to_string(id);
                 const std::string ctr = "__csy_ctr_" + std::to_string(id);
-                const NType bt = infer_expr_type(fns_, fn, s->iterable->args[0]);
+                const NType bt = infer_expr_type(fns_, fn, s->aux().iterable->kids().args[0]);
+                const std::string bound_expr = bt == NType::Float ? "csy_bound_f(" + expr(fn, s->aux().iterable->kids().args[0]) + ")"
+                                                                  : "(" + expr(fn, s->aux().iterable->kids().args[0]) + ")";
                 indent(out, depth);
-                out << "{ long long " << bound << " = "
-                    << (bt == NType::Float ? "csy_bound_f(" + expr(fn, s->iterable->args[0]) + ")"
-                                           : "(" + expr(fn, s->iterable->args[0]) + ")") << ";\n";
-                indent(out, depth + 1); out << "if (*__err) return 0;\n";
-                indent(out, depth + 1);
-                out << "for (long long " << ctr << " = 0; " << ctr << " < " << bound << "; " << ctr << "++) {\n";
-                indent(out, depth + 2); out << lv << " = " << ctr << ";\n";
-                for (const auto& bs : s->body) emit_stmt(out, fn, bs, depth + 2);
-                indent(out, depth + 1); out << "}\n";
+                out << "{ long long " << bound << " = " << bound_expr << ";\n";
+                if (can_fail(bound_expr)) { indent(out, depth + 1); out << "if (*__err) return 0;\n"; }
+                std::string preheader, ok_name;
+                const bool versioned = fast_index_.empty() && plan_versioned_loop(fn, s, bound, id, preheader, ok_name);
+                auto emit_loop = [&](int level) {
+                    indent(out, level);
+                    out << "for (long long " << ctr << " = 0; " << ctr << " < " << bound << "; " << ctr << "++) {\n";
+                    indent(out, level + 1); out << lv << " = " << ctr << ";\n";
+                    for (const auto& bs : s->body) emit_stmt(out, fn, bs, level + 1);
+                    indent(out, level); out << "}\n";
+                };
+                if (versioned) {
+                    out << preheader;
+                    indent(out, depth + 1); out << "if (" << ok_name << ") {\n";
+                    emit_loop(depth + 2);
+                    fast_index_.clear();
+                    indent(out, depth + 1); out << "} else {\n";
+                    emit_loop(depth + 2);
+                    indent(out, depth + 1); out << "}\n";
+                } else {
+                    emit_loop(depth + 1);
+                }
                 indent(out, depth); out << "}\n";
                 break;
             }
             case StmtKind::Return: {
-                const NType t = infer_expr_type(fns_, fn, s->ret_value);
+                const std::string ret_expr = expr(fn, s->ret_value);
                 indent(out, depth);
                 out << "{ " << c_type(fn.return_type) << " __r = (" << c_type(fn.return_type) << ")("
-                    << expr(fn, s->ret_value) << "); if (*__err) return 0; *__rtag = ";
-                if (returns_maybe_int(fn)) out << tag_expr(fn, s->ret_value);
-                else out << (t == NType::Float ? 1 : 0);
-                out << "; return __r; }\n";
+                    << ret_expr << "); " << (can_fail(ret_expr) ? "if (*__err) return 0; " : "");
+                if (returns_maybe_int(fn)) out << "*__rtag = " << tag_expr(fn, s->ret_value) << "; ";
+                out << "return __r; }\n";
                 break;
             }
             case StmtKind::Break:
@@ -1230,15 +1689,16 @@ private:
         const bool is_float = infer_expr_type(fns_, fn, e) == NType::Float;
         std::ostringstream s;
         s << (is_float ? "csy_safe_div_f(" : "csy_safe_div_i(")
-          << expr(fn, e->left) << ", " << expr(fn, e->right) << ", __err)";
+          << expr(fn, e->kids().left) << ", " << expr(fn, e->kids().right) << ", __err, " << site_id(fn, e->tok) << ")";
         return s.str();
     }
 
-    std::string safe_integer_arithmetic(TokenType op, const std::string& left, const std::string& right) {
+    std::string safe_integer_arithmetic(TokenType op, const std::string& left, const std::string& right,
+                                        const std::string& site) {
         const char* helper = op == TokenType::PLUS ? "csy_safe_add_i" :
                              op == TokenType::MINUS ? "csy_safe_sub_i" :
                              op == TokenType::STAR ? "csy_safe_mul_i" : "csy_safe_mod_i";
-        return std::string(helper) + "(" + left + ", " + right + ", __err)";
+        return std::string(helper) + "(" + left + ", " + right + ", __err, " + site + ")";
     }
 
     static std::string float_literal(double v) {
@@ -1252,22 +1712,39 @@ private:
     std::string expr(FnInfo& fn, const ExprPtr& e) {
         switch (e->kind) {
             case ExprKind::Int: return std::to_string(e->int_val) + "LL";
+            case ExprKind::Bool: return e->bool_val ? "1LL" : "0LL";
             case ExprKind::Float: return float_literal(e->float_val);
             case ExprKind::Ident: return vname(e->name);
             case ExprKind::Unary:
                 if (e->op == TokenType::MINUS) {
-                    const std::string operand = expr(fn, e->operand);
-                    if (infer_expr_type(fns_, fn, e->operand) == NType::Int)
-                        return "csy_safe_neg_i(" + operand + ", __err)";
+                    const std::string operand = expr(fn, e->kids().operand);
+                    if (infer_expr_type(fns_, fn, e->kids().operand) == NType::Int)
+                        return "csy_safe_neg_i(" + operand + ", __err, " + site_id(fn, e->tok) + ")";
                     return "(-(" + operand + "))";
                 }
-                return "(!(" + expr(fn, e->operand) + "))";
+                return "(!(" + expr(fn, e->kids().operand) + "))";
             case ExprKind::Binary: {
                 if (e->op == TokenType::SLASH) return "(" + safe_div(fn, e) + ")";
                 if ((e->op == TokenType::PLUS || e->op == TokenType::MINUS ||
                      e->op == TokenType::STAR || e->op == TokenType::PERCENT) &&
                     infer_expr_type(fns_, fn, e) == NType::Int) {
-                    return safe_integer_arithmetic(e->op, expr(fn, e->left), expr(fn, e->right));
+                    return safe_integer_arithmetic(e->op, expr(fn, e->kids().left), expr(fn, e->kids().right), site_id(fn, e->tok));
+                }
+                if (e->op == TokenType::LT || e->op == TokenType::GT || e->op == TokenType::LE ||
+                    e->op == TokenType::GE || e->op == TokenType::EQ || e->op == TokenType::NEQ) {
+                    const NType lt = infer_expr_type(fns_, fn, e->kids().left);
+                    const NType rt = infer_expr_type(fns_, fn, e->kids().right);
+                    const bool int_left = lt == NType::Int && rt == NType::Float;
+                    const bool int_right = lt == NType::Float && rt == NType::Int;
+                    if (int_left || int_right) {
+                        const int code = e->op == TokenType::EQ ? 0 : e->op == TokenType::NEQ ? 1 :
+                                         e->op == TokenType::LT ? 2 : e->op == TokenType::GT ? 3 :
+                                         e->op == TokenType::LE ? 4 : 5;
+                        const std::string l = expr(fn, e->kids().left);
+                        const std::string r = expr(fn, e->kids().right);
+                        if (int_left) return "csy_cmp_mixed(" + l + ", " + r + ", 1, " + std::to_string(code) + ")";
+                        return "csy_cmp_mixed(" + r + ", " + l + ", 0, " + std::to_string(code) + ")";
+                    }
                 }
                 const char* op =
                     e->op == TokenType::PLUS ? "+" : e->op == TokenType::MINUS ? "-" :
@@ -1276,24 +1753,40 @@ private:
                     e->op == TokenType::LE ? "<=" : e->op == TokenType::GE ? ">=" :
                     e->op == TokenType::EQ ? "==" : e->op == TokenType::NEQ ? "!=" :
                     e->op == TokenType::AND ? "&&" : "||";
-                return "(" + expr(fn, e->left) + " " + op + " " + expr(fn, e->right) + ")";
+                return "(" + expr(fn, e->kids().left) + " " + op + " " + expr(fn, e->kids().right) + ")";
             }
             case ExprKind::Call: {
-                const std::string& name = e->callee->name;
+                const std::string& name = e->kids().callee->name;
+                if (name == kLenCall) {
+                    if (!e->aux().native_fallback_func.empty()) {
+                        const int fallback = fallback_indices_.at(e->aux().native_fallback_func);
+                        return "__fallback(__ctx, " + std::to_string(fallback) + ", " +
+                               vname(e->kids().args[0]->name) + ", __err)";
+                    }
+                    return "len_" + e->kids().args[0]->name;
+                }
                 auto mit = math_whitelist().find(name);
                 if (mit != math_whitelist().end()) {
+                    if (mit->second.kind == MathKind::ToInt) {
+                        if (e->kids().args.empty()) return "0LL";
+                        const ExprPtr& value = e->kids().args[0];
+                        if (infer_expr_type(fns_, fn, value) == NType::Float) {
+                            return "csy_safe_to_int_f((double)(" + expr(fn, value) + "), __err, " + site_id(fn, e->tok) + ")";
+                        }
+                        return expr(fn, value);
+                    }
                     if (mit->second.kind == MathKind::Promote2) {
-                        NType a = infer_expr_type(fns_, fn, e->args[0]), b = infer_expr_type(fns_, fn, e->args[1]);
+                        NType a = infer_expr_type(fns_, fn, e->kids().args[0]), b = infer_expr_type(fns_, fn, e->kids().args[1]);
                         bool is_float = (a == NType::Float || b == NType::Float);
-                        std::string f = (name == "max") ? (is_float ? "fmax" : "csy_max_i")
-                                                        : (is_float ? "fmin" : "csy_min_i");
-                        return f + "(" + expr(fn, e->args[0]) + ", " + expr(fn, e->args[1]) + ")";
+                        std::string f = (name == "max") ? (is_float ? "csy_fmax" : "csy_max_i")
+                                                        : (is_float ? "csy_fmin" : "csy_min_i");
+                        return f + "(" + expr(fn, e->kids().args[0]) + ", " + expr(fn, e->kids().args[1]) + ")";
                     }
                     std::string t = mit->second.c_expr_template;
-                    for (size_t i = 0; i < e->args.size(); i++) {
+                    for (size_t i = 0; i < e->kids().args.size(); i++) {
                         std::string ph = "{" + std::to_string(i) + "}";
                         size_t pos = t.find(ph);
-                        if (pos != std::string::npos) t.replace(pos, ph.size(), "(double)(" + expr(fn, e->args[i]) + ")");
+                        if (pos != std::string::npos) t.replace(pos, ph.size(), "(double)(" + expr(fn, e->kids().args[i]) + ")");
                     }
                     return "(" + t + ")";
                 }
@@ -1301,14 +1794,14 @@ private:
                 callee_key(fns_, fn, e, key);
                 const FnInfo& callee = fns_.at(key);
                 bool sequence_args = false;
-                for (size_t i = 0; i < e->args.size(); i++)
-                    if (callee.sig[i] == 'M' && has_dynamic_call_tag(fn, e->args[i])) sequence_args = true;
+                for (size_t i = 0; i < e->kids().args.size(); i++)
+                    if (callee.sig[i] == 'M' && has_dynamic_call_tag(fn, e->kids().args[i])) sequence_args = true;
                 if (sequence_args) {
                     const size_t id = temp_id_++;
                     std::ostringstream staged, call;
                     call << fname(callee) << "(";
-                    for (size_t i = 0; i < e->args.size(); i++) {
-                        const ExprPtr& arg = e->args[i];
+                    for (size_t i = 0; i < e->kids().args.size(); i++) {
+                        const ExprPtr& arg = e->kids().args[i];
                         const std::string v = "__csy_arg_v_" + std::to_string(id) + "_" + std::to_string(i);
                         const std::string t = "__csy_arg_t_" + std::to_string(id) + "_" + std::to_string(i);
                         switch (callee.sig[i]) {
@@ -1316,6 +1809,15 @@ private:
                                 staged << " double* " << v << " = " << vname(arg->name) << ";"
                                        << " long long __csy_arg_n_" << id << "_" << i << " = len_" << arg->name << ";";
                                 call << v << ", __csy_arg_n_" << id << "_" << i << ", ";
+                                break;
+                            case 'J':
+                                staged << " long long* " << v << " = " << vname(arg->name) << ";"
+                                       << " long long __csy_arg_n_" << id << "_" << i << " = len_" << arg->name << ";";
+                                call << v << ", __csy_arg_n_" << id << "_" << i << ", ";
+                                break;
+                            case 'O':
+                                staged << " void* " << v << " = " << vname(arg->name) << ";";
+                                call << v << ", ";
                                 break;
                             case 'I':
                                 staged << " long long " << v << " = (long long)(" << expr(fn, arg) << ");";
@@ -1338,17 +1840,20 @@ private:
                         if (callee.sig[p] == 'I') call << "(long long)(" << value << "), ";
                         else call << "(double)(" << value << "), ";
                     }
-                    const std::string tag_out = returns_maybe_int(callee) ? "&" + call_tag_name(e) : "&__dummy_tag";
-                    call << "__depth + 1, __err, " << tag_out << ")";
+                    call << "__ctx, __fallback, __depth + 1, __err";
+                    if (returns_maybe_int(callee)) call << ", &" << call_tag_name(e);
+                    call << ")";
                     return "({" + staged.str() + " " + call.str() + "; })";
                 }
                 std::ostringstream args;
-                for (size_t i = 0; i < e->args.size(); i++) {
+                for (size_t i = 0; i < e->kids().args.size(); i++) {
                     switch (callee.sig[i]) {
-                        case 'A': args << vname(e->args[i]->name) << ", len_" << e->args[i]->name << ", "; break;
-                        case 'I': args << "(long long)(" << expr(fn, e->args[i]) << "), "; break;
-                        case 'M': args << "(double)(" << expr(fn, e->args[i]) << "), " << tag_expr(fn, e->args[i]) << ", "; break;
-                        default:  args << "(double)(" << expr(fn, e->args[i]) << "), "; break;
+                        case 'A': args << vname(e->kids().args[i]->name) << ", len_" << e->kids().args[i]->name << ", "; break;
+                        case 'J': args << vname(e->kids().args[i]->name) << ", len_" << e->kids().args[i]->name << ", "; break;
+                        case 'O': args << vname(e->kids().args[i]->name) << ", "; break;
+                        case 'I': args << "(long long)(" << expr(fn, e->kids().args[i]) << "), "; break;
+                        case 'M': args << "(double)(" << expr(fn, e->kids().args[i]) << "), " << tag_expr(fn, e->kids().args[i]) << ", "; break;
+                        default:  args << "(double)(" << expr(fn, e->kids().args[i]) << "), "; break;
                     }
                 }
                 for (size_t i = 0; i < callee.global_params.size(); i++) {
@@ -1357,13 +1862,16 @@ private:
                     if (callee.sig[p] == 'I') args << "(long long)(" << value << "), ";
                     else args << "(double)(" << value << "), ";
                 }
-                const std::string tag_out = returns_maybe_int(callee) ? "&" + call_tag_name(e) : "&__dummy_tag";
-                return fname(callee) + "(" + args.str() + "__depth + 1, __err, " + tag_out + ")";
+                const std::string tag_arg = returns_maybe_int(callee) ? ", &" + call_tag_name(e) : std::string();
+                return fname(callee) + "(" + args.str() + "__ctx, __fallback, __depth + 1, __err" + tag_arg + ")";
             }
             case ExprKind::Index: {
-                const std::string& name = e->object->name;
-                return "csy_array_get(" + vname(name) + ", len_" + name + ", (long long)(" +
-                       expr(fn, e->index) + "), __err)";
+                const std::string& name = e->kids().object->name;
+                if (fast_index_.count(e.get())) return vname(name) + "[" + plain_index(e->kids().index) + "]";
+                const bool int_array = infer_expr_type(fns_, fn, e->kids().object) == NType::I64Array;
+                return std::string(int_array ? "csy_i64_array_get(" : "csy_array_get(") +
+                       vname(name) + ", len_" + name + ", (long long)(" +
+                       expr(fn, e->kids().index) + "), __err, " + site_id(fn, e->tok) + ")";
             }
             default:
                 return "0";
@@ -1381,20 +1889,20 @@ private:
                 return has_dynamic_tag(fn, e->name) ? tag_name(e->name) : "1";
             }
             case ExprKind::Unary:
-                return e->op == TokenType::MINUS ? tag_expr(fn, e->operand) : "0";
+                return e->op == TokenType::MINUS ? tag_expr(fn, e->kids().operand) : "0";
             case ExprKind::Binary:
                 if (e->op == TokenType::PLUS || e->op == TokenType::MINUS || e->op == TokenType::STAR ||
                     e->op == TokenType::SLASH)
-                    return "(" + tag_expr(fn, e->left) + " | " + tag_expr(fn, e->right) + ")";
+                    return "(" + tag_expr(fn, e->kids().left) + " | " + tag_expr(fn, e->kids().right) + ")";
                 return "0";
-            case ExprKind::Index: return "1";
+            case ExprKind::Index: return infer_expr_type(fns_, fn, e) == NType::Float ? "1" : "0";
             case ExprKind::Call: {
-                const std::string& name = e->callee->name;
+                const std::string& name = e->kids().callee->name;
                 auto mit = math_whitelist().find(name);
                 if (mit != math_whitelist().end()) {
-                    if (mit->second.kind == MathKind::Pred1) return "0";
+                    if (mit->second.kind == MathKind::Pred1 || mit->second.kind == MathKind::ToInt) return "0";
                     if (mit->second.kind != MathKind::Promote2) return "1";
-                    return "(" + tag_expr(fn, e->args[0]) + " | " + tag_expr(fn, e->args[1]) + ")";
+                    return "(" + tag_expr(fn, e->kids().args[0]) + " | " + tag_expr(fn, e->kids().args[1]) + ")";
                 }
                 std::string key;
                 if (!callee_key(fns_, fn, e, key)) return "0";
@@ -1413,21 +1921,21 @@ namespace {
 void find_array_params_expr(const ExprPtr& e, const std::unordered_set<std::string>& params,
                             std::unordered_set<std::string>& arrays) {
     if (!e) return;
-    if (e->kind == ExprKind::Index && e->object && e->object->kind == ExprKind::Ident &&
-        params.count(e->object->name)) {
-        arrays.insert(e->object->name);
+    if (e->kind == ExprKind::Index && e->kids().object && e->kids().object->kind == ExprKind::Ident &&
+        params.count(e->kids().object->name)) {
+        arrays.insert(e->kids().object->name);
     }
-    find_array_params_expr(e->left, params, arrays);
-    find_array_params_expr(e->right, params, arrays);
-    find_array_params_expr(e->operand, params, arrays);
-    find_array_params_expr(e->target, params, arrays);
-    find_array_params_expr(e->value, params, arrays);
-    find_array_params_expr(e->callee, params, arrays);
-    find_array_params_expr(e->object, params, arrays);
-    find_array_params_expr(e->index, params, arrays);
-    for (const auto& arg : e->args) find_array_params_expr(arg, params, arrays);
-    for (const auto& item : e->elements) find_array_params_expr(item, params, arrays);
-    for (const auto& pair : e->dict_pairs) {
+    find_array_params_expr(e->kids().left, params, arrays);
+    find_array_params_expr(e->kids().right, params, arrays);
+    find_array_params_expr(e->kids().operand, params, arrays);
+    find_array_params_expr(e->kids().target, params, arrays);
+    find_array_params_expr(e->kids().value, params, arrays);
+    find_array_params_expr(e->kids().callee, params, arrays);
+    find_array_params_expr(e->kids().object, params, arrays);
+    find_array_params_expr(e->kids().index, params, arrays);
+    for (const auto& arg : e->kids().args) find_array_params_expr(arg, params, arrays);
+    for (const auto& item : e->kids().elements) find_array_params_expr(item, params, arrays);
+    for (const auto& pair : e->kids().dict_pairs) {
         find_array_params_expr(pair.first, params, arrays);
         find_array_params_expr(pair.second, params, arrays);
     }
@@ -1440,18 +1948,179 @@ void find_array_params_stmts(const std::vector<StmtPtr>& body,
         if (!s) continue;
         find_array_params_expr(s->expr, params, arrays);
         find_array_params_expr(s->cond, params, arrays);
-        find_array_params_expr(s->iterable, params, arrays);
+        find_array_params_expr(s->aux().iterable, params, arrays);
         find_array_params_expr(s->ret_value, params, arrays);
         find_array_params_stmts(s->body, params, arrays);
-        find_array_params_stmts(s->then_body, params, arrays);
-        find_array_params_stmts(s->else_body, params, arrays);
-        for (const auto& branch : s->elifs) {
+        find_array_params_stmts(s->aux().then_body, params, arrays);
+        find_array_params_stmts(s->aux().else_body, params, arrays);
+        for (const auto& branch : s->aux().elifs) {
             find_array_params_expr(branch.first, params, arrays);
             find_array_params_stmts(branch.second, params, arrays);
         }
     }
 }
 
+void find_opaque_params_expr(const ExprPtr& e, const std::unordered_set<std::string>& params,
+                            std::unordered_set<std::string>& opaque) {
+    if (!e) return;
+    if (!e->aux().native_fallback_func.empty() && e->kids().args.size() == 1 && e->kids().args[0] &&
+        e->kids().args[0]->kind == ExprKind::Ident && params.count(e->kids().args[0]->name)) {
+        opaque.insert(e->kids().args[0]->name);
+    }
+    find_opaque_params_expr(e->kids().left, params, opaque);
+    find_opaque_params_expr(e->kids().right, params, opaque);
+    find_opaque_params_expr(e->kids().operand, params, opaque);
+    find_opaque_params_expr(e->kids().target, params, opaque);
+    find_opaque_params_expr(e->kids().value, params, opaque);
+    find_opaque_params_expr(e->kids().callee, params, opaque);
+    find_opaque_params_expr(e->kids().object, params, opaque);
+    find_opaque_params_expr(e->kids().index, params, opaque);
+    for (const auto& arg : e->kids().args) find_opaque_params_expr(arg, params, opaque);
+    for (const auto& item : e->kids().elements) find_opaque_params_expr(item, params, opaque);
+    for (const auto& pair : e->kids().dict_pairs) {
+        find_opaque_params_expr(pair.first, params, opaque);
+        find_opaque_params_expr(pair.second, params, opaque);
+    }
+}
+
+void find_opaque_params_stmts(const std::vector<StmtPtr>& body,
+                              const std::unordered_set<std::string>& params,
+                              std::unordered_set<std::string>& opaque) {
+    for (const auto& s : body) {
+        if (!s) continue;
+        find_opaque_params_expr(s->expr, params, opaque);
+        find_opaque_params_expr(s->cond, params, opaque);
+        find_opaque_params_expr(s->aux().iterable, params, opaque);
+        find_opaque_params_expr(s->ret_value, params, opaque);
+        find_opaque_params_stmts(s->body, params, opaque);
+        find_opaque_params_stmts(s->aux().then_body, params, opaque);
+        find_opaque_params_stmts(s->aux().else_body, params, opaque);
+        for (const auto& branch : s->aux().elifs) {
+            find_opaque_params_expr(branch.first, params, opaque);
+            find_opaque_params_stmts(branch.second, params, opaque);
+        }
+    }
+}
+
+void mark_fallback_expr(const ExprPtr& e, const std::unordered_set<std::string>& params,
+                        const std::unordered_set<std::string>& arrays,
+                        const std::unordered_set<std::string>& basic_aliases, const std::string& helper,
+                        bool& found) {
+    if (!e) return;
+    const bool direct_len = e->kids().callee && e->kids().callee->kind == ExprKind::Ident && e->kids().callee->name == kLenCall;
+    const bool qualified_len = e->kids().callee && e->kids().callee->kind == ExprKind::Member &&
+        e->kids().callee->name == "len" && e->kids().callee->kids().object &&
+        e->kids().callee->kids().object->kind == ExprKind::Ident && basic_aliases.count(e->kids().callee->kids().object->name);
+    if (e->kind == ExprKind::Call && (direct_len || qualified_len) && e->kids().args.size() == 1 && e->kids().args[0] &&
+        e->kids().args[0]->kind == ExprKind::Ident && params.count(e->kids().args[0]->name) &&
+        !arrays.count(e->kids().args[0]->name)) {
+        e->aux_mut().native_fallback_func = helper;
+        found = true;
+    }
+    mark_fallback_expr(e->kids().left, params, arrays, basic_aliases, helper, found);
+    mark_fallback_expr(e->kids().right, params, arrays, basic_aliases, helper, found);
+    mark_fallback_expr(e->kids().operand, params, arrays, basic_aliases, helper, found);
+    mark_fallback_expr(e->kids().target, params, arrays, basic_aliases, helper, found);
+    mark_fallback_expr(e->kids().value, params, arrays, basic_aliases, helper, found);
+    mark_fallback_expr(e->kids().callee, params, arrays, basic_aliases, helper, found);
+    mark_fallback_expr(e->kids().object, params, arrays, basic_aliases, helper, found);
+    mark_fallback_expr(e->kids().index, params, arrays, basic_aliases, helper, found);
+    for (const auto& arg : e->kids().args) mark_fallback_expr(arg, params, arrays, basic_aliases, helper, found);
+    for (const auto& item : e->kids().elements) mark_fallback_expr(item, params, arrays, basic_aliases, helper, found);
+    for (const auto& pair : e->kids().dict_pairs) {
+        mark_fallback_expr(pair.first, params, arrays, basic_aliases, helper, found);
+        mark_fallback_expr(pair.second, params, arrays, basic_aliases, helper, found);
+    }
+}
+
+void mark_fallback_stmts(const std::vector<StmtPtr>& body, const std::unordered_set<std::string>& params,
+                         const std::unordered_set<std::string>& arrays,
+                         const std::unordered_set<std::string>& basic_aliases, bool& found) {
+    for (const auto& s : body) {
+        if (!s) continue;
+        mark_fallback_expr(s->expr, params, arrays, basic_aliases, "$csy_fallback_len", found);
+        mark_fallback_expr(s->cond, params, arrays, basic_aliases, "$csy_fallback_len", found);
+        mark_fallback_expr(s->aux().iterable, params, arrays, basic_aliases, "$csy_fallback_len", found);
+        mark_fallback_expr(s->ret_value, params, arrays, basic_aliases, "$csy_fallback_len", found);
+        mark_fallback_stmts(s->body, params, arrays, basic_aliases, found);
+        mark_fallback_stmts(s->aux().then_body, params, arrays, basic_aliases, found);
+        mark_fallback_stmts(s->aux().else_body, params, arrays, basic_aliases, found);
+        for (const auto& branch : s->aux().elifs) {
+            mark_fallback_expr(branch.first, params, arrays, basic_aliases, "$csy_fallback_len", found);
+            mark_fallback_stmts(branch.second, params, arrays, basic_aliases, found);
+        }
+    }
+}
+
+StmtPtr make_len_fallback(const NodeTok& tok, const std::string& name, const std::string& alias) {
+    auto fn = make_stmt(StmtKind::FuncDecl, tok);
+    fn->aux_mut().func_name = name;
+    fn->aux_mut().params = {"value"};
+    auto callee = make_expr(ExprKind::Member, tok);
+    callee->name = "len";
+    callee->kids_mut().object = make_expr(ExprKind::Ident, tok);
+    callee->kids().object->name = alias;
+    auto value = make_expr(ExprKind::Ident, tok);
+    value->name = "value";
+    auto call = make_expr(ExprKind::Call, tok);
+    call->kids_mut().callee = callee;
+    call->kids_mut().args.push_back(value);
+    call->depth = 2;
+    auto ret = make_stmt(StmtKind::Return, tok);
+    ret->ret_value = call;
+    fn->body.push_back(ret);
+    return fn;
+}
+
+}
+
+void prepare_native_fallbacks(Module& mod) {
+    const size_t original_count = mod.body.size();
+    bool found = false;
+    NodeTok tok{};
+    std::unordered_set<std::string> names;
+    std::unordered_set<std::string> basic_aliases;
+    for (size_t i = 0; i < original_count; i++)
+        if (mod.body[i]) {
+            if (mod.body[i]->kind == StmtKind::FuncDecl) names.insert(mod.body[i]->aux().func_name);
+            if (mod.body[i]->kind == StmtKind::Import && mod.body[i]->aux().import_module == "basic")
+                basic_aliases.insert(mod.body[i]->aux().import_alias);
+        }
+    std::string helper = "$csy_fallback_len";
+    while (names.count(helper)) helper.insert(helper.begin() + 1, '_');
+    for (size_t i = 0; i < original_count; i++) {
+        const auto& s = mod.body[i];
+        if (!s || s->kind != StmtKind::FuncDecl) continue;
+        std::unordered_set<std::string> params(s->aux().params.begin(), s->aux().params.end());
+        std::unordered_set<std::string> arrays;
+        find_array_params_stmts(s->body, params, arrays);
+        bool in_function = false;
+        mark_fallback_stmts(s->body, params, arrays, basic_aliases, in_function);
+        if (in_function) {
+            if (!found) tok = s->tok;
+            found = true;
+            std::function<void(const ExprPtr&)> set_helper = [&](const ExprPtr& e) {
+                if (!e) return;
+                if (e->aux().native_fallback_func == "$csy_fallback_len") e->aux_mut().native_fallback_func = helper;
+                set_helper(e->kids().left); set_helper(e->kids().right); set_helper(e->kids().operand); set_helper(e->kids().target);
+                set_helper(e->kids().value); set_helper(e->kids().callee); set_helper(e->kids().object); set_helper(e->kids().index);
+                for (const auto& arg : e->kids().args) set_helper(arg);
+                for (const auto& item : e->kids().elements) set_helper(item);
+                for (const auto& pair : e->kids().dict_pairs) { set_helper(pair.first); set_helper(pair.second); }
+            };
+            std::function<void(const std::vector<StmtPtr>&)> set_body = [&](const std::vector<StmtPtr>& body) {
+                for (const auto& st : body) {
+                    if (!st) continue;
+                    set_helper(st->expr); set_helper(st->cond); set_helper(st->aux().iterable); set_helper(st->ret_value);
+                    set_body(st->body); set_body(st->aux().then_body); set_body(st->aux().else_body);
+                    for (const auto& branch : st->aux().elifs) { set_helper(branch.first); set_body(branch.second); }
+                }
+            };
+            set_body(s->body);
+        }
+    }
+    if (!found) return;
+    mod.body.push_back(make_len_fallback(tok, helper, *basic_aliases.begin()));
 }
 
 
@@ -1548,6 +2217,7 @@ int run_compiler(const std::vector<std::string>& command, const std::string& err
     const pid_t child = ::fork();
     if (child < 0) return -1;
     if (child == 0) {
+        ::prctl(PR_SET_PDEATHSIG, SIGTERM);
         const int err_fd = ::open(error_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (err_fd < 0 || ::dup2(err_fd, STDERR_FILENO) < 0) _exit(126);
         if (err_fd != STDERR_FILENO) ::close(err_fd);
@@ -1592,8 +2262,8 @@ std::vector<std::string> callee_instances(const InstMap& insts, const FnInfo& fn
     all_found = true;
     all_stmt_exprs(fn.decl->body, [&](const ExprPtr& root) {
         return expr_tree_all(root, [&](const ExprPtr& n) {
-            if (n->kind == ExprKind::Call && n->callee && n->callee->kind == ExprKind::Ident &&
-                math_whitelist().count(n->callee->name) == 0) {
+            if (n->kind == ExprKind::Call && n->kids().callee && n->kids().callee->kind == ExprKind::Ident &&
+                !builtin_call_name(n->kids().callee->name)) {
                 std::string key;
                 if (!callee_key(insts, fn, n, key) || !insts.count(key)) all_found = false;
                 else keys.push_back(key);
@@ -1658,10 +2328,18 @@ std::unordered_set<std::string> own_backend_components(
 uint32_t sig_code(const std::string& sig) {
     uint32_t code = 0;
     for (size_t i = 0; i < sig.size(); i++) {
-        const uint32_t c = sig[i] == 'I' ? 1u : sig[i] == 'F' ? 2u : 3u;
+        const uint32_t c = sig[i] == 'I' ? 1u : sig[i] == 'F' ? 2u :
+                           sig[i] == 'J' || sig[i] == 'O' ? 0u : 3u;
         code |= c << (2 * i);
     }
     return code;
+}
+
+uint16_t opaque_mask(const std::string& sig) {
+    uint16_t mask = 0;
+    for (size_t i = 0; i < sig.size() && i < 16; i++)
+        if (sig[i] == 'O') mask |= static_cast<uint16_t>(1u << i);
+    return mask;
 }
 
 
@@ -1740,6 +2418,20 @@ bool bind_library(const std::string& so_path, IRModule& ir, int& loaded, std::st
     const GlobalRow* global_table = static_cast<const GlobalRow*>(dlsym(lib, "csy_global_table"));
     const int* global_count = static_cast<const int*>(dlsym(lib, "csy_global_count"));
     if (!table || !count) { why = "compiled library has no entry table"; return false; }
+    struct SiteRow { const char* func; const char* file; int line; int col; };
+    const SiteRow* site_table = static_cast<const SiteRow*>(dlsym(lib, "csy_site_table"));
+    const int* site_count = static_cast<const int*>(dlsym(lib, "csy_site_count"));
+    const uint32_t site_base = static_cast<uint32_t>(ir.native_sites.size());
+    if (site_table && site_count && *site_count > 0) {
+        for (int i = 0; i < *site_count; i++) {
+            NativeSite site;
+            site.func = site_table[i].func ? site_table[i].func : "";
+            site.file = site_table[i].file ? site_table[i].file : "";
+            site.line = site_table[i].line;
+            site.col = site_table[i].col;
+            ir.native_sites.push_back(std::move(site));
+        }
+    }
     if ((global_table == nullptr) != (global_count == nullptr)) {
         why = "compiled library has incomplete module-global metadata";
         return false;
@@ -1776,7 +2468,9 @@ bool bind_library(const std::string& so_path, IRModule& ir, int& loaded, std::st
             user_nparams + num_globals != sig_len || (num_globals > 0 && !names)) continue;
         NativeVariant v;
         v.entry = row.entry;
+        v.site_base = site_base;
         v.sig = sig_code(row.sig);
+        v.opaque_mask = opaque_mask(row.sig);
         v.nparams = static_cast<uint8_t>(user_nparams);
         bool globals_found = true;
         for (int g = 0; g < num_globals; g++) {
@@ -1786,7 +2480,8 @@ bool bind_library(const std::string& so_path, IRModule& ir, int& loaded, std::st
             v.global_indices.push_back(gi->second);
         }
         if (!globals_found) continue;
-        v.ret_float = row.ret_float != 0;
+        v.ret_float = row.ret_float == 1;
+        v.ret_bool = row.ret_float == 2;
         ir.functions[it->second].native_variants.push_back(v);
         loaded++;
     }
@@ -1800,18 +2495,18 @@ void collect_assigned_names(const std::vector<StmtPtr>& body, std::unordered_set
         switch (s->kind) {
             case StmtKind::VarDecl:
             case StmtKind::ExprStmt:
-                if (s->expr && s->expr->target && s->expr->target->kind == ExprKind::Ident) out.insert(s->expr->target->name);
+                if (s->expr && s->expr->kids().target && s->expr->kids().target->kind == ExprKind::Ident) out.insert(s->expr->kids().target->name);
                 break;
             case StmtKind::If:
-                collect_assigned_names(s->then_body, out);
-                for (const auto& el : s->elifs) collect_assigned_names(el.second, out);
-                collect_assigned_names(s->else_body, out);
+                collect_assigned_names(s->aux().then_body, out);
+                for (const auto& el : s->aux().elifs) collect_assigned_names(el.second, out);
+                collect_assigned_names(s->aux().else_body, out);
                 break;
             case StmtKind::While:
                 collect_assigned_names(s->body, out);
                 break;
             case StmtKind::For:
-                out.insert(s->loop_var);
+                out.insert(s->aux().loop_var);
                 collect_assigned_names(s->body, out);
                 break;
             default:
@@ -1861,11 +2556,11 @@ private:
                 }
                 return violation(e->name);
             case ExprKind::Call:
-                for (const auto& a : e->args) if (!expr(a, st)) return false;
+                for (const auto& a : e->kids().args) if (!expr(a, st)) return false;
                 return true;
             default:
-                return expr(e->left, st) && expr(e->right, st) && expr(e->operand, st) && expr(e->index, st) &&
-                       expr(e->object, st) && expr(e->value, st);
+                return expr(e->kids().left, st) && expr(e->kids().right, st) && expr(e->kids().operand, st) && expr(e->kids().index, st) &&
+                       expr(e->kids().object, st) && expr(e->kids().value, st);
         }
     }
     static Set intersect(const Set& a, const Set& b) {
@@ -1888,14 +2583,14 @@ private:
                 case StmtKind::ExprStmt: {
                     const ExprPtr& e = s->expr;
                     if (!e) break;
-                    if (!expr(e->value, st)) return false;
-                    if (e->target) {
-                        if (e->target->kind == ExprKind::Index) {
-                            if (!expr(e->target->index, st) || !expr(e->target->object, st)) return false;
-                        } else if (e->target->kind == ExprKind::Ident) {
+                    if (!expr(e->kids().value, st)) return false;
+                    if (e->kids().target) {
+                        if (e->kids().target->kind == ExprKind::Index) {
+                            if (!expr(e->kids().target->kids().index, st) || !expr(e->kids().target->kids().object, st)) return false;
+                        } else if (e->kids().target->kind == ExprKind::Ident) {
                             const bool plain = s->kind == StmtKind::VarDecl || e->kind == ExprKind::Assign;
-                            if (!plain && !st.count(e->target->name)) return violation(e->target->name);
-                            st.insert(e->target->name);
+                            if (!plain && !st.count(e->kids().target->name)) return violation(e->kids().target->name);
+                            st.insert(e->kids().target->name);
                         }
                     } else if (e->kind != ExprKind::Assign && !expr(e, st)) {
                         return false;
@@ -1908,14 +2603,14 @@ private:
                     std::vector<Set> ends;
                     bool ft = true;
                     Set out;
-                    if (!branch(s->then_body, entry, ft, out)) return false;
+                    if (!branch(s->aux().then_body, entry, ft, out)) return false;
                     if (ft) ends.push_back(out);
-                    for (const auto& el : s->elifs) {
+                    for (const auto& el : s->aux().elifs) {
                         if (!expr(el.first, entry)) return false;
                         if (!branch(el.second, entry, ft, out)) return false;
                         if (ft) ends.push_back(out);
                     }
-                    if (!branch(s->else_body, entry, ft, out)) return false;
+                    if (!branch(s->aux().else_body, entry, ft, out)) return false;
                     if (ft) ends.push_back(out);
                     if (ends.empty()) { reachable = false; break; }
                     Set merged = ends[0];
@@ -1930,9 +2625,9 @@ private:
                     break;
                 }
                 case StmtKind::For: {
-                    if (s->iterable && !expr(s->iterable, st)) return false;
+                    if (s->aux().iterable && !expr(s->aux().iterable, st)) return false;
                     Set inner = st;
-                    inner.insert(s->loop_var);
+                    inner.insert(s->aux().loop_var);
                     bool ft = true; Set out;
                     if (!branch(s->body, inner, ft, out)) return false;
                     break;
@@ -1963,23 +2658,23 @@ void collect_module_global_names(const std::vector<StmtPtr>& body,
                                  std::unordered_set<std::string>& names) {
     for (const auto& s : body) {
         if (!s || s->kind == StmtKind::FuncDecl) continue;
-        if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->target) {
-            if (s->expr->target->kind == ExprKind::Ident) {
-                names.insert(s->expr->target->name);
-            } else if (s->expr->target->kind == ExprKind::VectorLiteral) {
-                for (const auto& element : s->expr->target->elements)
+        if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target) {
+            if (s->expr->kids().target->kind == ExprKind::Ident) {
+                names.insert(s->expr->kids().target->name);
+            } else if (s->expr->kids().target->kind == ExprKind::VectorLiteral) {
+                for (const auto& element : s->expr->kids().target->kids().elements)
                     if (element && element->kind == ExprKind::Ident) names.insert(element->name);
             }
         }
         if (s->kind == StmtKind::If) {
-            collect_module_global_names(s->then_body, names);
-            for (const auto& branch : s->elifs) collect_module_global_names(branch.second, names);
-            collect_module_global_names(s->else_body, names);
+            collect_module_global_names(s->aux().then_body, names);
+            for (const auto& branch : s->aux().elifs) collect_module_global_names(branch.second, names);
+            collect_module_global_names(s->aux().else_body, names);
         } else if (s->kind == StmtKind::While || s->kind == StmtKind::For || s->kind == StmtKind::Block) {
             collect_module_global_names(s->body, names);
         } else if (s->kind == StmtKind::Try) {
             collect_module_global_names(s->body, names);
-            collect_module_global_names(s->then_body, names);
+            collect_module_global_names(s->aux().then_body, names);
         }
     }
 }
@@ -1995,27 +2690,27 @@ void collect_module_global_assignments(const std::vector<StmtPtr>& body,
                                        std::unordered_map<std::string, ModuleGlobalAssignments>& found) {
     for (const auto& s : body) {
         if (!s || s->kind == StmtKind::FuncDecl) continue;
-        if ((s->kind == StmtKind::VarDecl || s->kind == StmtKind::ExprStmt) && s->expr && s->expr->target &&
-            s->expr->target->kind == ExprKind::Ident && globals.count(s->expr->target->name)) {
-            auto& item = found[s->expr->target->name];
+        if ((s->kind == StmtKind::VarDecl || s->kind == StmtKind::ExprStmt) && s->expr && s->expr->kids().target &&
+            s->expr->kids().target->kind == ExprKind::Ident && globals.count(s->expr->kids().target->name)) {
+            auto& item = found[s->expr->kids().target->name];
             if (s->expr->kind == ExprKind::Assign) {
                 item.has_plain_assignment = true;
-                item.values.push_back(s->expr->value);
+                item.values.push_back(s->expr->kids().value);
             } else if (s->expr->kind == ExprKind::CompoundAssign) {
-                item.values.push_back(s->expr->value);
+                item.values.push_back(s->expr->kids().value);
             } else {
                 item.invalid_target = true;
             }
         }
         if (s->kind == StmtKind::If) {
-            collect_module_global_assignments(s->then_body, globals, found);
-            for (const auto& branch : s->elifs) collect_module_global_assignments(branch.second, globals, found);
-            collect_module_global_assignments(s->else_body, globals, found);
+            collect_module_global_assignments(s->aux().then_body, globals, found);
+            for (const auto& branch : s->aux().elifs) collect_module_global_assignments(branch.second, globals, found);
+            collect_module_global_assignments(s->aux().else_body, globals, found);
         } else if (s->kind == StmtKind::While || s->kind == StmtKind::For || s->kind == StmtKind::Block) {
             collect_module_global_assignments(s->body, globals, found);
         } else if (s->kind == StmtKind::Try) {
             collect_module_global_assignments(s->body, globals, found);
-            collect_module_global_assignments(s->then_body, globals, found);
+            collect_module_global_assignments(s->aux().then_body, globals, found);
         }
     }
 }
@@ -2029,16 +2724,16 @@ bool numeric_module_expr(const ExprPtr& e, const std::unordered_set<std::string>
         case ExprKind::Ident:
             return possible_globals.count(e->name) != 0;
         case ExprKind::Unary:
-            return e->op == TokenType::MINUS && numeric_module_expr(e->operand, possible_globals);
+            return e->op == TokenType::MINUS && numeric_module_expr(e->kids().operand, possible_globals);
         case ExprKind::Binary:
             return (e->op == TokenType::PLUS || e->op == TokenType::MINUS || e->op == TokenType::STAR ||
                     e->op == TokenType::SLASH || e->op == TokenType::PERCENT) &&
-                   numeric_module_expr(e->left, possible_globals) &&
-                   numeric_module_expr(e->right, possible_globals);
+                   numeric_module_expr(e->kids().left, possible_globals) &&
+                   numeric_module_expr(e->kids().right, possible_globals);
         case ExprKind::Call:
-            if (!e->callee || e->callee->kind != ExprKind::Ident ||
-                !math_whitelist().count(e->callee->name)) return false;
-            return std::all_of(e->args.begin(), e->args.end(), [&](const ExprPtr& arg) {
+            if (!e->kids().callee || e->kids().callee->kind != ExprKind::Ident ||
+                !math_whitelist().count(e->kids().callee->name)) return false;
+            return std::all_of(e->kids().args.begin(), e->kids().args.end(), [&](const ExprPtr& arg) {
                 return numeric_module_expr(arg, possible_globals);
             });
         default:
@@ -2076,18 +2771,18 @@ void collect_module_global_writes(const std::vector<StmtPtr>& body,
     for (const auto& s : body) {
         if (!s || s->kind == StmtKind::FuncDecl) continue;
         if ((s->kind == StmtKind::VarDecl || s->kind == StmtKind::ExprStmt) && s->expr &&
-            s->expr->target && s->expr->target->kind == ExprKind::Ident &&
-            globals.count(s->expr->target->name))
-            writes.insert(s->expr->target->name);
+            s->expr->kids().target && s->expr->kids().target->kind == ExprKind::Ident &&
+            globals.count(s->expr->kids().target->name))
+            writes.insert(s->expr->kids().target->name);
         if (s->kind == StmtKind::If) {
-            collect_module_global_writes(s->then_body, globals, writes);
-            for (const auto& branch : s->elifs) collect_module_global_writes(branch.second, globals, writes);
-            collect_module_global_writes(s->else_body, globals, writes);
+            collect_module_global_writes(s->aux().then_body, globals, writes);
+            for (const auto& branch : s->aux().elifs) collect_module_global_writes(branch.second, globals, writes);
+            collect_module_global_writes(s->aux().else_body, globals, writes);
         } else if (s->kind == StmtKind::While || s->kind == StmtKind::For || s->kind == StmtKind::Block) {
             collect_module_global_writes(s->body, globals, writes);
         } else if (s->kind == StmtKind::Try) {
             collect_module_global_writes(s->body, globals, writes);
-            collect_module_global_writes(s->then_body, globals, writes);
+            collect_module_global_writes(s->aux().then_body, globals, writes);
         }
     }
 }
@@ -2096,7 +2791,7 @@ std::string unsafe_module_write_reason(const Stmt* decl,
                                        const std::unordered_set<std::string>& globals) {
     std::unordered_set<std::string> writes;
     collect_module_global_writes(decl->body, globals, writes);
-    for (const auto& p : decl->params) writes.erase(p);
+    for (const auto& p : decl->aux().params) writes.erase(p);
     if (writes.empty()) return {};
     const std::string name = user_visible_name(*std::min_element(writes.begin(), writes.end()));
     return "writes the module-level variable '" + name + "' (native code cannot update module state)";
@@ -2128,34 +2823,34 @@ void mentions_stmts(const std::vector<StmtPtr>& body, std::unordered_set<std::st
 void mentions_expr(const ExprPtr& e, std::unordered_set<std::string>& out) {
     if (!e) return;
     if (e->kind == ExprKind::Ident) out.insert(e->name);
-    mentions_expr(e->left, out);
-    mentions_expr(e->right, out);
-    mentions_expr(e->operand, out);
-    mentions_expr(e->target, out);
-    mentions_expr(e->value, out);
-    mentions_expr(e->callee, out);
-    mentions_expr(e->object, out);
-    mentions_expr(e->index, out);
-    for (const auto& a : e->args) mentions_expr(a, out);
-    for (const auto& a : e->elements) mentions_expr(a, out);
-    for (const auto& p : e->dict_pairs) { mentions_expr(p.first, out); mentions_expr(p.second, out); }
+    mentions_expr(e->kids().left, out);
+    mentions_expr(e->kids().right, out);
+    mentions_expr(e->kids().operand, out);
+    mentions_expr(e->kids().target, out);
+    mentions_expr(e->kids().value, out);
+    mentions_expr(e->kids().callee, out);
+    mentions_expr(e->kids().object, out);
+    mentions_expr(e->kids().index, out);
+    for (const auto& a : e->kids().args) mentions_expr(a, out);
+    for (const auto& a : e->kids().elements) mentions_expr(a, out);
+    for (const auto& p : e->kids().dict_pairs) { mentions_expr(p.first, out); mentions_expr(p.second, out); }
 }
 
 void mentions_stmt(const StmtPtr& s, std::unordered_set<std::string>& out) {
     if (!s) return;
     mentions_expr(s->expr, out);
     mentions_expr(s->cond, out);
-    mentions_expr(s->iterable, out);
+    mentions_expr(s->aux().iterable, out);
     mentions_expr(s->ret_value, out);
-    mentions_expr(s->using_expr, out);
-    if (!s->loop_var.empty()) out.insert(s->loop_var);
-    if (!s->catch_var.empty()) out.insert(s->catch_var);
-    if (!s->using_alias.empty()) out.insert(s->using_alias);
-    for (const auto& p : s->params) out.insert(p);
+    mentions_expr(s->aux().using_expr, out);
+    if (!s->aux().loop_var.empty()) out.insert(s->aux().loop_var);
+    if (!s->aux().catch_var.empty()) out.insert(s->aux().catch_var);
+    if (!s->aux().using_alias.empty()) out.insert(s->aux().using_alias);
+    for (const auto& p : s->aux().params) out.insert(p);
     mentions_stmts(s->body, out);
-    mentions_stmts(s->then_body, out);
-    mentions_stmts(s->else_body, out);
-    for (const auto& el : s->elifs) { mentions_expr(el.first, out); mentions_stmts(el.second, out); }
+    mentions_stmts(s->aux().then_body, out);
+    mentions_stmts(s->aux().else_body, out);
+    for (const auto& el : s->aux().elifs) { mentions_expr(el.first, out); mentions_stmts(el.second, out); }
 }
 
 void mentions_stmts(const std::vector<StmtPtr>& body, std::unordered_set<std::string>& out) {
@@ -2165,49 +2860,49 @@ void mentions_stmts(const std::vector<StmtPtr>& body, std::unordered_set<std::st
 void collect_for_loop_vars(const std::vector<StmtPtr>& body, std::unordered_set<std::string>& out) {
     for (const auto& s : body) {
         if (!s) continue;
-        if (s->kind == StmtKind::For) out.insert(s->loop_var);
+        if (s->kind == StmtKind::For) out.insert(s->aux().loop_var);
         collect_for_loop_vars(s->body, out);
-        collect_for_loop_vars(s->then_body, out);
-        collect_for_loop_vars(s->else_body, out);
-        for (const auto& el : s->elifs) collect_for_loop_vars(el.second, out);
+        collect_for_loop_vars(s->aux().then_body, out);
+        collect_for_loop_vars(s->aux().else_body, out);
+        for (const auto& el : s->aux().elifs) collect_for_loop_vars(el.second, out);
     }
 }
 
 void collect_plain_assigned(const std::vector<StmtPtr>& body, std::unordered_set<std::string>& out) {
     for (const auto& s : body) {
         if (!s) continue;
-        if ((s->kind == StmtKind::VarDecl || s->kind == StmtKind::ExprStmt) && s->expr && s->expr->target) {
-            if (s->expr->target->kind == ExprKind::Ident) out.insert(s->expr->target->name);
-            else if (s->expr->target->kind == ExprKind::VectorLiteral)
-                for (const auto& el : s->expr->target->elements)
+        if ((s->kind == StmtKind::VarDecl || s->kind == StmtKind::ExprStmt) && s->expr && s->expr->kids().target) {
+            if (s->expr->kids().target->kind == ExprKind::Ident) out.insert(s->expr->kids().target->name);
+            else if (s->expr->kids().target->kind == ExprKind::VectorLiteral)
+                for (const auto& el : s->expr->kids().target->kids().elements)
                     if (el && el->kind == ExprKind::Ident) out.insert(el->name);
         }
         collect_plain_assigned(s->body, out);
-        collect_plain_assigned(s->then_body, out);
-        collect_plain_assigned(s->else_body, out);
-        for (const auto& el : s->elifs) collect_plain_assigned(el.second, out);
+        collect_plain_assigned(s->aux().then_body, out);
+        collect_plain_assigned(s->aux().else_body, out);
+        for (const auto& el : s->aux().elifs) collect_plain_assigned(el.second, out);
     }
 }
 
 bool mentions_outside_for_var(const StmtPtr& s, const std::string& x) {
     if (!s) return false;
-    if (s->kind == StmtKind::For && s->loop_var == x) {
+    if (s->kind == StmtKind::For && s->aux().loop_var == x) {
         std::unordered_set<std::string> v;
-        mentions_expr(s->iterable, v);
+        mentions_expr(s->aux().iterable, v);
         return v.count(x) != 0;
     }
     std::unordered_set<std::string> m;
     mentions_expr(s->expr, m);
     mentions_expr(s->cond, m);
-    mentions_expr(s->iterable, m);
+    mentions_expr(s->aux().iterable, m);
     mentions_expr(s->ret_value, m);
-    mentions_expr(s->using_expr, m);
-    if (m.count(x) || s->loop_var == x || s->catch_var == x || s->using_alias == x) return true;
-    for (const auto& p : s->params) if (p == x) return true;
+    mentions_expr(s->aux().using_expr, m);
+    if (m.count(x) || s->aux().loop_var == x || s->aux().catch_var == x || s->aux().using_alias == x) return true;
+    for (const auto& p : s->aux().params) if (p == x) return true;
     for (const auto& c : s->body) if (mentions_outside_for_var(c, x)) return true;
-    for (const auto& c : s->then_body) if (mentions_outside_for_var(c, x)) return true;
-    for (const auto& c : s->else_body) if (mentions_outside_for_var(c, x)) return true;
-    for (const auto& el : s->elifs) {
+    for (const auto& c : s->aux().then_body) if (mentions_outside_for_var(c, x)) return true;
+    for (const auto& c : s->aux().else_body) if (mentions_outside_for_var(c, x)) return true;
+    for (const auto& el : s->aux().elifs) {
         std::unordered_set<std::string> v;
         mentions_expr(el.first, v);
         if (v.count(x)) return true;
@@ -2224,6 +2919,7 @@ public:
     std::unordered_set<std::string> read_unsafe;
     std::string bad;
     bool exits_early = false;
+    const std::unordered_map<std::string, FnInfo>* user_fns = nullptr;
 
     void run(const StmtPtr& loop) {
         if (loop->kind == StmtKind::While) {
@@ -2232,7 +2928,7 @@ public:
             for_header(*loop);
         }
         stmts(loop->body, true);
-        if (loop->kind == StmtKind::For) scope_[loop->loop_var]--;
+        if (loop->kind == StmtKind::For) scope_[loop->aux().loop_var]--;
     }
 
 private:
@@ -2250,15 +2946,15 @@ private:
         if (!first.count(n)) { order.push_back(n); first[n] = kind; }
     }
     void for_header(const Stmt& f) {
-        const ExprPtr& it = f.iterable;
-        if (!it || it->kind != ExprKind::Call || !it->callee || it->callee->kind != ExprKind::Ident ||
-            it->callee->name != "range" || it->args.size() != 1) {
+        const ExprPtr& it = f.aux().iterable;
+        if (!it || it->kind != ExprKind::Call || !it->kids().callee || it->kids().callee->kind != ExprKind::Ident ||
+            it->kids().callee->name != "range" || it->kids().args.size() != 1) {
             fail("has a 'for' loop over something other than 'thru N' (e.g. a vector or string)");
             return;
         }
-        expr(it->args[0]);
-        assign(f.loop_var, 'S');
-        scope_[f.loop_var]++;
+        expr(it->kids().args[0]);
+        assign(f.aux().loop_var, 'S');
+        scope_[f.aux().loop_var]++;
     }
     void expr(const ExprPtr& e) {
         if (!e || !bad.empty()) return;
@@ -2270,27 +2966,37 @@ private:
                 read(e->name);
                 break;
             case ExprKind::Index:
-                if (!e->object || e->object->kind != ExprKind::Ident) { fail("indexes something that is not a plain variable"); return; }
-                indexed.insert(e->object->name);
-                arr_read.insert(e->object->name);
-                read(e->object->name);
-                expr(e->index);
+                if (!e->kids().object || e->kids().object->kind != ExprKind::Ident) { fail("indexes something that is not a plain variable"); return; }
+                indexed.insert(e->kids().object->name);
+                arr_read.insert(e->kids().object->name);
+                read(e->kids().object->name);
+                expr(e->kids().index);
                 break;
             case ExprKind::Call:
-                if (!e->callee || e->callee->kind != ExprKind::Ident) { fail("calls something that is not a plain function name"); return; }
-                if (!math_whitelist().count(e->callee->name)) {
-                    fail("calls '" + user_visible_name(e->callee->name) +
-                         "' (only math builtins are allowed in an outlined loop for now)");
-                    return;
+                if (!e->kids().callee || e->kids().callee->kind != ExprKind::Ident) { fail("calls something that is not a plain function name"); return; }
+                if (!math_whitelist().count(e->kids().callee->name)) {
+                    const std::string& cname = e->kids().callee->name;
+                    const auto uit = user_fns ? user_fns->find(cname) : std::unordered_map<std::string, FnInfo>::const_iterator();
+                    if (!user_fns || uit == user_fns->end()) {
+                        fail("calls '" + user_visible_name(cname) +
+                             "' (only math builtins and plain numeric functions are allowed in an outlined loop)");
+                        return;
+                    }
+                    if (!uit->second.array_params.empty() || !uit->second.opaque_params.empty() ||
+                        uit->second.param_names.size() != e->kids().args.size()) {
+                        fail("calls '" + user_visible_name(cname) +
+                             "', which takes arrays or interpreter values (after a native error the loop could not be re-run safely)");
+                        return;
+                    }
                 }
-                for (const auto& a : e->args) expr(a);
+                for (const auto& a : e->kids().args) expr(a);
                 break;
             case ExprKind::Binary:
-                expr(e->left);
-                expr(e->right);
+                expr(e->kids().left);
+                expr(e->kids().right);
                 break;
             case ExprKind::Unary:
-                expr(e->operand);
+                expr(e->kids().operand);
                 break;
             case ExprKind::String: fail("uses a string"); break;
             case ExprKind::Bool:
@@ -2302,21 +3008,21 @@ private:
         }
     }
     void assign_expr(const ExprPtr& a, bool top) {
-        if (!a->target) { fail("has an assignment without a target"); return; }
+        if (!a->kids().target) { fail("has an assignment without a target"); return; }
         const bool compound = a->kind == ExprKind::CompoundAssign;
-        const ExprPtr& t = a->target;
+        const ExprPtr& t = a->kids().target;
         if (t->kind == ExprKind::Ident) {
             if (compound) read(t->name);
-            expr(a->value);
+            expr(a->kids().value);
             assign(t->name, top ? 'A' : 'C');
-        } else if (t->kind == ExprKind::Index && t->object && t->object->kind == ExprKind::Ident) {
-            const std::string& name = t->object->name;
+        } else if (t->kind == ExprKind::Index && t->kids().object && t->kids().object->kind == ExprKind::Ident) {
+            const std::string& name = t->kids().object->name;
             indexed.insert(name);
             arr_written.insert(name);
             if (compound) arr_read.insert(name);
             read(name);
-            expr(t->index);
-            expr(a->value);
+            expr(t->kids().index);
+            expr(a->kids().value);
         } else {
             fail("assigns to something other than a plain number variable or an f64_array element");
         }
@@ -2336,9 +3042,9 @@ private:
                     break;
                 case StmtKind::If:
                     expr(s->cond);
-                    stmts(s->then_body, false);
-                    for (const auto& el : s->elifs) { expr(el.first); stmts(el.second, false); }
-                    stmts(s->else_body, false);
+                    stmts(s->aux().then_body, false);
+                    for (const auto& el : s->aux().elifs) { expr(el.first); stmts(el.second, false); }
+                    stmts(s->aux().else_body, false);
                     break;
                 case StmtKind::While:
                     expr(s->cond);
@@ -2351,7 +3057,7 @@ private:
                     nest_++;
                     stmts(s->body, false);
                     nest_--;
-                    scope_[s->loop_var]--;
+                    scope_[s->aux().loop_var]--;
                     break;
                 case StmtKind::Break:
                 case StmtKind::Continue:
@@ -2377,17 +3083,17 @@ ExprPtr clone_expr(const ExprPtr& e, const RenameMap& ren) {
         auto it = ren.find(c->name);
         if (it != ren.end()) c->name = it->second;
     }
-    c->left = clone_expr(e->left, ren);
-    c->right = clone_expr(e->right, ren);
-    c->operand = clone_expr(e->operand, ren);
-    c->target = clone_expr(e->target, ren);
-    c->value = clone_expr(e->value, ren);
-    c->callee = clone_expr(e->callee, ren);
-    c->object = clone_expr(e->object, ren);
-    c->index = clone_expr(e->index, ren);
-    for (auto& a : c->args) a = clone_expr(a, ren);
-    for (auto& a : c->elements) a = clone_expr(a, ren);
-    for (auto& p : c->dict_pairs) { p.first = clone_expr(p.first, ren); p.second = clone_expr(p.second, ren); }
+    c->kids_mut().left = clone_expr(e->kids_mut().left, ren);
+    c->kids_mut().right = clone_expr(e->kids_mut().right, ren);
+    c->kids_mut().operand = clone_expr(e->kids_mut().operand, ren);
+    c->kids_mut().target = clone_expr(e->kids_mut().target, ren);
+    c->kids_mut().value = clone_expr(e->kids_mut().value, ren);
+    c->kids_mut().callee = clone_expr(e->kids_mut().callee, ren);
+    c->kids_mut().object = clone_expr(e->kids_mut().object, ren);
+    c->kids_mut().index = clone_expr(e->kids_mut().index, ren);
+    for (auto& a : c->kids_mut().args) a = clone_expr(a, ren);
+    for (auto& a : c->kids_mut().elements) a = clone_expr(a, ren);
+    for (auto& p : c->kids_mut().dict_pairs) { p.first = clone_expr(p.first, ren); p.second = clone_expr(p.second, ren); }
     return c;
 }
 
@@ -2403,18 +3109,18 @@ std::vector<StmtPtr> clone_stmts(const std::vector<StmtPtr>& v, const RenameMap&
 StmtPtr clone_stmt(const StmtPtr& s, const RenameMap& ren) {
     if (!s) return nullptr;
     auto c = std::make_shared<Stmt>(*s);
-    c->using_expr = clone_expr(s->using_expr, ren);
+    c->aux_mut().using_expr = clone_expr(s->aux_mut().using_expr, ren);
     c->expr = clone_expr(s->expr, ren);
     c->cond = clone_expr(s->cond, ren);
-    c->iterable = clone_expr(s->iterable, ren);
+    c->aux_mut().iterable = clone_expr(s->aux_mut().iterable, ren);
     c->ret_value = clone_expr(s->ret_value, ren);
     c->body = clone_stmts(s->body, ren);
-    c->then_body = clone_stmts(s->then_body, ren);
-    c->else_body = clone_stmts(s->else_body, ren);
-    for (auto& el : c->elifs) { el.first = clone_expr(el.first, ren); el.second = clone_stmts(el.second, ren); }
-    if (!c->loop_var.empty()) {
-        auto it = ren.find(c->loop_var);
-        if (it != ren.end()) c->loop_var = it->second;
+    c->aux_mut().then_body = clone_stmts(s->aux_mut().then_body, ren);
+    c->aux_mut().else_body = clone_stmts(s->aux_mut().else_body, ren);
+    for (auto& el : c->aux_mut().elifs) { el.first = clone_expr(el.first, ren); el.second = clone_stmts(el.second, ren); }
+    if (!c->aux().loop_var.empty()) {
+        auto it = ren.find(c->aux().loop_var);
+        if (it != ren.end()) c->aux_mut().loop_var = it->second;
     }
     return c;
 }
@@ -2451,24 +3157,36 @@ private:
     std::unordered_map<std::string, std::vector<uint32_t>> mention_index_;
     std::unordered_map<std::string, std::vector<uint32_t>> def_index_;
     std::unordered_set<std::string> fn_names_, fn_touched_;
+    std::unordered_map<std::string, FnInfo> cand_;
 
     void index_module() {
         for (size_t j = 0; j < body_.size(); j++) {
             const StmtPtr& s = body_[j];
             if (!s) continue;
             if (s->kind == StmtKind::FuncDecl) {
-                fn_names_.insert(s->func_name);
+                fn_names_.insert(s->aux().func_name);
                 add_touched(*s);
+                if (!s->aux().func_name.empty() && s->aux().func_name[0] != '$') {
+                    FnInfo info;
+                    info.decl = s.get();
+                    info.param_names = s->aux().params;
+                    info.user_param_count = s->aux().params.size();
+                    std::unordered_set<std::string> pset(s->aux().params.begin(), s->aux().params.end());
+                    find_array_params_stmts(s->body, pset, info.array_params);
+                    find_opaque_params_stmts(s->body, pset, info.opaque_params);
+                    for (const auto& name : info.array_params) info.opaque_params.erase(name);
+                    cand_.emplace(s->aux().func_name, std::move(info));
+                }
                 continue;
             }
             std::unordered_set<std::string> m;
             mentions_stmt(s, m);
             for (const auto& name : m) mention_index_[name].push_back(static_cast<uint32_t>(j));
-            if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->target) {
-                if (s->expr->target->kind == ExprKind::Ident) {
-                    def_index_[s->expr->target->name].push_back(static_cast<uint32_t>(j));
-                } else if (s->expr->target->kind == ExprKind::VectorLiteral) {
-                    for (const auto& el : s->expr->target->elements)
+            if (s->kind == StmtKind::VarDecl && s->expr && s->expr->kind == ExprKind::Assign && s->expr->kids().target) {
+                if (s->expr->kids().target->kind == ExprKind::Ident) {
+                    def_index_[s->expr->kids().target->name].push_back(static_cast<uint32_t>(j));
+                } else if (s->expr->kids().target->kind == ExprKind::VectorLiteral) {
+                    for (const auto& el : s->expr->kids().target->kids().elements)
                         if (el && el->kind == ExprKind::Ident) def_index_[el->name].push_back(static_cast<uint32_t>(j));
                 }
             }
@@ -2480,7 +3198,7 @@ private:
         mentions_stmts(f.body, m);
         collect_for_loop_vars(f.body, for_vars);
         collect_plain_assigned(f.body, assigned);
-        for (const auto& p : f.params) m.erase(p);
+        for (const auto& p : f.aux().params) m.erase(p);
         for (const auto& v : for_vars)
             if (!assigned.count(v)) m.erase(v);
         fn_touched_.insert(m.begin(), m.end());
@@ -2504,10 +3222,10 @@ private:
         for (uint32_t idx : it->second) {
             if (idx <= k) continue;
             const Stmt& s = *body_[idx];
-            if (s.kind == StmtKind::VarDecl && s.expr && s.expr->kind == ExprKind::Assign && s.expr->target &&
-                s.expr->target->kind == ExprKind::Ident && s.expr->target->name == name) {
+            if (s.kind == StmtKind::VarDecl && s.expr && s.expr->kind == ExprKind::Assign && s.expr->kids().target &&
+                s.expr->kids().target->kind == ExprKind::Ident && s.expr->kids().target->name == name) {
                 std::unordered_set<std::string> v;
-                mentions_expr(s.expr->value, v);
+                mentions_expr(s.expr->kids().value, v);
                 return !v.count(name);
             }
             if (mentions_outside_for_var(body_[idx], name)) return false;
@@ -2526,8 +3244,8 @@ private:
         if (mit != mention_index_.end())
             for (uint32_t idx : mit->second) if (idx > di && idx < k) return 0;
         const Stmt& def = *body_[di];
-        if (!def.expr || !def.expr->target || def.expr->target->kind != ExprKind::Ident) return 0;
-        return guess_expr(def.expr->value, di, depth + 1);
+        if (!def.expr || !def.expr->kids().target || def.expr->kids().target->kind != ExprKind::Ident) return 0;
+        return guess_expr(def.expr->kids().value, di, depth + 1);
     }
     char guess_expr(const ExprPtr& e, size_t at, int depth) const {
         if (!e) return 0;
@@ -2535,9 +3253,9 @@ private:
             case ExprKind::Int: return 'I';
             case ExprKind::Float: return 'F';
             case ExprKind::Ident: return guess_type(e->name, at, depth);
-            case ExprKind::Unary: return e->op == TokenType::MINUS ? guess_expr(e->operand, at, depth) : 0;
+            case ExprKind::Unary: return e->op == TokenType::MINUS ? guess_expr(e->kids().operand, at, depth) : 0;
             case ExprKind::Binary: {
-                const char a = guess_expr(e->left, at, depth), b = guess_expr(e->right, at, depth);
+                const char a = guess_expr(e->kids().left, at, depth), b = guess_expr(e->kids().right, at, depth);
                 if (!a || !b) return 0;
                 if (e->op == TokenType::PLUS || e->op == TokenType::MINUS || e->op == TokenType::STAR ||
                     e->op == TokenType::SLASH)
@@ -2546,13 +3264,14 @@ private:
                 return 0;
             }
             case ExprKind::Call: {
-                if (!e->callee || e->callee->kind != ExprKind::Ident) return 0;
-                auto mit = math_whitelist().find(e->callee->name);
+                if (!e->kids().callee || e->kids().callee->kind != ExprKind::Ident) return 0;
+                auto mit = math_whitelist().find(e->kids().callee->name);
                 if (mit == math_whitelist().end()) return 0;
                 if (mit->second.kind == MathKind::Pred1) return 'I';
+                if (mit->second.kind == MathKind::ToInt) return 'I';
                 if (mit->second.kind != MathKind::Promote2) return 'F';
-                if (e->args.size() != 2) return 0;
-                const char a = guess_expr(e->args[0], at, depth), b = guess_expr(e->args[1], at, depth);
+                if (e->kids().args.size() != 2) return 0;
+                const char a = guess_expr(e->kids().args[0], at, depth), b = guess_expr(e->kids().args[1], at, depth);
                 if (!a || !b) return 0;
                 return (a == 'F' || b == 'F') ? 'F' : 'I';
             }
@@ -2572,17 +3291,17 @@ private:
     static ExprPtr first_assigned_literal(const Stmt& loop, const std::string& name) {
         for (const auto& st : loop.body) {
             if (!st || st->kind != StmtKind::VarDecl || !st->expr || st->expr->kind != ExprKind::Assign ||
-                !st->expr->target || st->expr->target->kind != ExprKind::Ident || st->expr->target->name != name)
+                !st->expr->kids().target || st->expr->kids().target->kind != ExprKind::Ident || st->expr->kids().target->name != name)
                 continue;
-            const ExprPtr& v = st->expr->value;
+            const ExprPtr& v = st->expr->kids().value;
             return (v && (v->kind == ExprKind::Int || v->kind == ExprKind::Float)) ? v : nullptr;
         }
         return nullptr;
     }
 
     static bool runs_at_least_once(const Stmt& loop) {
-        if (loop.kind != StmtKind::For || !loop.iterable || loop.iterable->args.size() != 1) return false;
-        const ExprPtr& bound = loop.iterable->args[0];
+        if (loop.kind != StmtKind::For || !loop.aux().iterable || loop.aux().iterable->kids().args.size() != 1) return false;
+        const ExprPtr& bound = loop.aux().iterable->kids().args[0];
         return bound && bound->kind == ExprKind::Int && bound->int_val >= 1;
     }
 
@@ -2598,6 +3317,7 @@ private:
     bool plan(size_t k, std::vector<StmtPtr>& emitted) {
         const StmtPtr loop = body_[k];
         LoopFacts facts;
+        facts.user_fns = &cand_;
         facts.run(loop);
         if (!facts.bad.empty()) return keep(loop, facts.bad);
         for (const auto& a : facts.arr_written)
@@ -2662,13 +3382,12 @@ private:
         std::vector<StmtPtr> fn_stmts;
         std::vector<std::string> fn_list;
         auto release_names = [&]() { for (const auto& n : fn_list) fn_names_.erase(n); };
-        const std::unordered_map<std::string, FnInfo> no_candidates;
         for (size_t oi = 0; oi < outputs; oi++) {
             const std::string ret_name = live.empty() ? std::string() : live[oi];
             auto fn = make_stmt(StmtKind::FuncDecl, tok);
-            fn->func_name = unique_name(tok.line);
-            fn_list.push_back(fn->func_name);
-            fn->params = params;
+            fn->aux_mut().func_name = unique_name(tok.line);
+            fn_list.push_back(fn->aux().func_name);
+            fn->aux_mut().params = params;
             for (const auto& sd : seeds) {
                 if (sd.first != ret_name) continue;
                 auto target = make_expr(ExprKind::Ident, tok);
@@ -2678,8 +3397,8 @@ private:
                 lit->int_val = 0;
                 lit->float_val = 0.0;
                 auto assign = make_expr(ExprKind::Assign, tok);
-                assign->target = target;
-                assign->value = lit;
+                assign->kids_mut().target = target;
+                assign->kids_mut().value = lit;
                 assign->depth = 3;
                 auto seed_stmt = make_stmt(StmtKind::VarDecl, tok);
                 seed_stmt->expr = assign;
@@ -2705,7 +3424,7 @@ private:
             info.user_param_count = params.size();
             std::unordered_set<std::string> pset(params.begin(), params.end());
             find_array_params_stmts(fn->body, pset, info.array_params);
-            EligibilityScanner scanner(no_candidates);
+            EligibilityScanner scanner(cand_);
             if (!scanner.scan(info)) {
                 release_names();
                 return keep(loop, scanner.why());
@@ -2724,12 +3443,12 @@ private:
             auto callee = make_expr(ExprKind::Ident, tok);
             callee->name = fname;
             auto call = make_expr(ExprKind::Call, tok);
-            call->callee = callee;
+            call->kids_mut().callee = callee;
             call->depth = 2;
             for (const auto& p : params) {
                 auto arg = make_expr(ExprKind::Ident, tok);
                 arg->name = p;
-                call->args.push_back(arg);
+                call->kids_mut().args.push_back(arg);
             }
             return call;
         };
@@ -2737,8 +3456,8 @@ private:
             auto target = make_expr(ExprKind::Ident, tok);
             target->name = target_name;
             auto assign = make_expr(ExprKind::Assign, tok);
-            assign->target = target;
-            assign->value = value;
+            assign->kids_mut().target = target;
+            assign->kids_mut().value = value;
             assign->depth = 3;
             auto st = make_stmt(StmtKind::VarDecl, tok);
             st->expr = assign;
@@ -2791,7 +3510,7 @@ private:
 
 NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode mode, bool embed_library) {
     NativeReport report;
-    if (std::getenv("CSY_NO_NATIVE_JIT")) {
+    if (std::getenv("CSY_NO_NATIVE_JIT") && mode != NativeMode::Aot) {
         dbg("CSY_NO_NATIVE_JIT set, skipping entirely");
         report.status = "native fast path disabled (CSY_NO_NATIVE_JIT is set)";
         return report;
@@ -2801,16 +3520,18 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     std::vector<std::string> decl_order;
     for (const auto& s : mod.body) {
         if (s->kind != StmtKind::FuncDecl) continue;
-        if (s->func_name.empty()) continue;
-        if (s->func_name[0] == '$') { report.interpreted_only++; continue; }
+        if (s->aux().func_name.empty()) continue;
+        if (s->aux().func_name[0] == '$') { report.interpreted_only++; continue; }
         FnInfo info;
         info.decl = s.get();
-        info.param_names = s->params;
-        info.user_param_count = s->params.size();
-        std::unordered_set<std::string> params(s->params.begin(), s->params.end());
+        info.param_names = s->aux().params;
+        info.user_param_count = s->aux().params.size();
+        std::unordered_set<std::string> params(s->aux().params.begin(), s->aux().params.end());
         find_array_params_stmts(s->body, params, info.array_params);
-        fns.emplace(s->func_name, std::move(info));
-        decl_order.push_back(s->func_name);
+        find_opaque_params_stmts(s->body, params, info.opaque_params);
+        for (const auto& name : info.array_params) info.opaque_params.erase(name);
+        fns.emplace(s->aux().func_name, std::move(info));
+        decl_order.push_back(s->aux().func_name);
     }
     for (const auto& s : mod.body)
         if (s && (s->kind == StmtKind::For || s->kind == StmtKind::While)) report.top_level_loops++;
@@ -2848,13 +3569,15 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     const std::unordered_set<std::string> numeric_globals = numeric_module_globals(*analysis_body, proof_globals);
     std::unordered_map<std::string, int> fn_line;
     for (const auto& s : mod.body)
-        if (s && s->kind == StmtKind::FuncDecl && !s->func_name.empty())
-            fn_line.emplace(s->func_name, s->tok.line);
+        if (s && s->kind == StmtKind::FuncDecl && !s->aux().func_name.empty())
+            fn_line.emplace(s->aux().func_name, s->tok.line);
     if (fns.empty()) {
         report.status = "no top-level functions";
         return report;
     }
 
+    const std::unordered_set<std::string> bool_functions = compute_bool_functions(fns);
+    BoolFunctionScope bool_scope(&bool_functions);
     EligibilityScanner scanner(fns);
     for (auto& [name, fn] : fns) {
         if (fn.param_names.size() > kMaxNativeParams) {
@@ -2949,33 +3672,54 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     std::vector<std::string> creation_order;
     TypeInferer inferer(insts, bases, creation_order);
     std::unordered_set<std::string> root_keys;
-    auto root_signature = [&](const FnInfo& base, unsigned mask) {
+    auto root_signature = [&](const FnInfo& base, unsigned scalar_mask, unsigned array_mask) {
         std::string sig;
-        int bit = 0;
+        size_t scalar_bit = 0, array_bit = 0;
         for (const auto& p : base.param_names) {
-            if (base.array_params.count(p)) sig += 'A';
-            else sig += ((mask >> bit++) & 1u) ? 'F' : 'I';
+            if (base.array_params.count(p)) sig += ((array_mask >> array_bit++) & 1u) ? 'J' : 'A';
+            else if (base.opaque_params.count(p)) sig += 'O';
+            else sig += ((scalar_mask >> scalar_bit++) & 1u) ? 'F' : 'I';
         }
         return sig;
     };
+    auto root_signatures = [&](const FnInfo& base, unsigned scalar_mask) {
+        size_t arrays = 0;
+        for (const auto& p : base.param_names) if (base.array_params.count(p)) arrays++;
+        std::vector<unsigned> masks;
+        if (arrays <= 3) {
+            for (unsigned m = 0; m < (1u << arrays); m++) masks.push_back(m);
+        } else {
+            masks.push_back(0);
+            masks.push_back((1u << arrays) - 1);
+        }
+        std::vector<std::string> signatures;
+        for (unsigned mask : masks) signatures.push_back(root_signature(base, scalar_mask, mask));
+        return signatures;
+    };
     for (const auto& name : decl_order) {
         if (!bases.count(name)) continue;
-        const std::string key = inferer.ensure(name, root_signature(bases.at(name), 0));
-        if (!key.empty()) root_keys.insert(key);
+        for (const auto& sig : root_signatures(bases.at(name), 0)) {
+            const std::string key = inferer.ensure(name, sig);
+            if (!key.empty()) root_keys.insert(key);
+        }
     }
     for (const auto& name : decl_order) {
         if (!bases.count(name)) continue;
         const FnInfo& base = bases.at(name);
         size_t scalar_params = 0;
-        for (const auto& p : base.param_names) if (!base.array_params.count(p)) scalar_params++;
+        for (const auto& p : base.param_names)
+            if (!base.array_params.count(p) && !base.opaque_params.count(p)) scalar_params++;
         if (scalar_params == 0) continue;
         std::vector<unsigned> masks;
         if (scalar_params <= 3) { for (unsigned m = 1; m < (1u << scalar_params); m++) masks.push_back(m); }
         else masks.push_back((1u << scalar_params) - 1);
         for (unsigned m : masks) {
             if (insts.size() >= kMaxInstances / 2) break;
-            const std::string key = inferer.ensure(name, root_signature(base, m));
-            if (!key.empty()) root_keys.insert(key);
+            for (const auto& sig : root_signatures(base, m)) {
+                if (insts.size() >= kMaxInstances / 2) break;
+                const std::string key = inferer.ensure(name, sig);
+                if (!key.empty()) root_keys.insert(key);
+            }
         }
     }
     for (const auto& note : mod.loop_notes) {
@@ -2985,7 +3729,8 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
             if (bit == bases.end() || note.sig_hint.size() != bit->second.param_names.size()) continue;
             bool shape_ok = true;
             for (size_t i = 0; i < note.sig_hint.size(); i++)
-                if (bit->second.array_params.count(bit->second.param_names[i]) != (note.sig_hint[i] == 'A' ? 1u : 0u)) shape_ok = false;
+                if (bit->second.array_params.count(bit->second.param_names[i]) !=
+                    ((note.sig_hint[i] == 'A' || note.sig_hint[i] == 'J') ? 1u : 0u)) shape_ok = false;
             if (!shape_ok || insts.size() >= kMaxInstances / 2) continue;
             const std::string key = inferer.ensure(fname, note.sig_hint);
             if (!key.empty()) root_keys.insert(key);
@@ -3065,7 +3810,11 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
         return report;
     }
 
-    const std::string c_source = CCodeGen(insts).generate(emit_order, exported);
+    std::unordered_map<std::string, int> fallback_indices;
+    for (size_t i = 0; i < ir.functions.size(); i++)
+        if (ir.functions[i].name.compare(0, 14, "$csy_fallback_") == 0)
+            fallback_indices[ir.functions[i].name] = static_cast<int>(i);
+    const std::string c_source = CCodeGen(insts, fallback_indices).generate(emit_order, exported);
     report.variants = emit_order.size();
     dbg("compiled " + std::to_string(emit_order.size()) + " native variant(s) of " +
         std::to_string(eligible.size()) + " function(s) to C");
@@ -3081,8 +3830,8 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
     {
         const char* be = std::getenv("CSY_NATIVE_BACKEND");
         x64_forced = be && std::string(be) == "x64";
-        if (!(be && std::string(be) == "c")) {
-            X64CodeGen x64gen(insts);
+        if (mode != NativeMode::Aot && !(be && std::string(be) == "c")) {
+            X64CodeGen x64gen(insts, fallback_indices);
             x64_ok = x64gen.generate(emit_order, exported, x64_image, x64_why);
             if (x64_ok && !x64_forced) own_keys = own_backend_components(insts, emit_order, x64gen.loop_stats());
             if (x64_ok) {
@@ -3115,13 +3864,19 @@ NativeReport try_native_compile_impl(const Module& mod, IRModule& ir, NativeMode
             std::vector<std::string> order_c, exported_c;
             for (const auto& key : emit_order) if (!own_keys.count(key)) order_c.push_back(key);
             for (const auto& key : exported) if (!own_keys.count(key)) exported_c.push_back(key);
-            c_source_use = CCodeGen(insts).generate(order_c, exported_c);
+            c_source_use = CCodeGen(insts, fallback_indices).generate(order_c, exported_c);
             c_variant_count = order_c.size();
         }
     }
     ir.native_c_source = c_source_use;
     ir.native_target = native_host_target();
     ir.native_library.clear();
+
+    if (mode == NativeMode::Aot) {
+        fill_report(compiled_detail, variant_reason);
+        report.status = "native AOT source generated";
+        return report;
+    }
 
     std::string why;
     auto use_x64 = [&](const std::string& reason) -> bool {
@@ -3203,7 +3958,7 @@ public:
     BcCallRewriter(const BcCallRewriter&) = delete;
     BcCallRewriter& operator=(const BcCallRewriter&) = delete;
     ~BcCallRewriter() {
-        for (auto it = saved_.rbegin(); it != saved_.rend(); ++it) it->first->callee = it->second;
+        for (auto it = saved_.rbegin(); it != saved_.rend(); ++it) it->first->kids_mut().callee = it->second;
     }
 
 private:
@@ -3214,54 +3969,54 @@ private:
     template <class F>
     static void each_child_stmt(const StmtPtr& s, F&& f) {
         for (const auto& b : s->body) f(b);
-        for (const auto& b : s->then_body) f(b);
-        for (const auto& el : s->elifs) for (const auto& b : el.second) f(b);
-        for (const auto& b : s->else_body) f(b);
+        for (const auto& b : s->aux().then_body) f(b);
+        for (const auto& el : s->aux().elifs) for (const auto& b : el.second) f(b);
+        for (const auto& b : s->aux().else_body) f(b);
     }
 
     template <class F>
     static void each_child_expr(const ExprPtr& e, F&& f) {
-        f(e->left); f(e->right); f(e->operand); f(e->target); f(e->value);
-        f(e->callee); f(e->object); f(e->index);
-        for (const auto& a : e->args) f(a);
-        for (const auto& a : e->elements) f(a);
-        for (const auto& kv : e->dict_pairs) { f(kv.first); f(kv.second); }
+        f(e->kids().left); f(e->kids().right); f(e->kids().operand); f(e->kids().target); f(e->kids().value);
+        f(e->kids().callee); f(e->kids().object); f(e->kids().index);
+        for (const auto& a : e->kids().args) f(a);
+        for (const auto& a : e->kids().elements) f(a);
+        for (const auto& kv : e->kids().dict_pairs) { f(kv.first); f(kv.second); }
     }
 
     void collect_stmt(const StmtPtr& s) {
         if (!s) return;
         switch (s->kind) {
             case StmtKind::Import:
-                if (s->import_module == "basic") aliases_.insert(s->import_alias);
-                else declared_.insert(s->import_alias);
+                if (s->aux().import_module == "basic") aliases_.insert(s->aux().import_alias);
+                else declared_.insert(s->aux().import_alias);
                 break;
             case StmtKind::Connect:
-                declared_.insert(s->connect_alias);
-                for (const auto& n : s->connect_exports) declared_.insert(n);
+                declared_.insert(s->aux().connect_alias);
+                for (const auto& n : s->aux().connect_exports) declared_.insert(n);
                 break;
-            case StmtKind::Using: declared_.insert(s->using_alias); break;
+            case StmtKind::Using: declared_.insert(s->aux().using_alias); break;
             case StmtKind::FuncDecl:
-                declared_.insert(s->func_name);
-                for (const auto& p : s->params) declared_.insert(p);
+                declared_.insert(s->aux().func_name);
+                for (const auto& p : s->aux().params) declared_.insert(p);
                 break;
-            case StmtKind::For: declared_.insert(s->loop_var); break;
-            case StmtKind::Try: declared_.insert(s->catch_var); break;
+            case StmtKind::For: declared_.insert(s->aux().loop_var); break;
+            case StmtKind::Try: declared_.insert(s->aux().catch_var); break;
             default: break;
         }
         collect_expr(s->expr);
-        collect_expr(s->using_expr);
+        collect_expr(s->aux().using_expr);
         collect_expr(s->cond);
-        collect_expr(s->iterable);
+        collect_expr(s->aux().iterable);
         collect_expr(s->ret_value);
-        for (const auto& el : s->elifs) collect_expr(el.first);
+        for (const auto& el : s->aux().elifs) collect_expr(el.first);
         each_child_stmt(s, [this](const StmtPtr& c) { collect_stmt(c); });
     }
 
     void collect_expr(const ExprPtr& e) {
         if (!e) return;
-        if ((e->kind == ExprKind::Assign || e->kind == ExprKind::CompoundAssign) && e->target &&
-            e->target->kind == ExprKind::Ident) {
-            declared_.insert(e->target->name);
+        if ((e->kind == ExprKind::Assign || e->kind == ExprKind::CompoundAssign) && e->kids().target &&
+            e->kids().target->kind == ExprKind::Ident) {
+            declared_.insert(e->kids().target->name);
         }
         each_child_expr(e, [this](const ExprPtr& c) { collect_expr(c); });
     }
@@ -3269,23 +4024,23 @@ private:
     void rewrite_stmt(const StmtPtr& s) {
         if (!s) return;
         rewrite_expr(s->expr);
-        rewrite_expr(s->using_expr);
+        rewrite_expr(s->aux().using_expr);
         rewrite_expr(s->cond);
-        rewrite_expr(s->iterable);
+        rewrite_expr(s->aux().iterable);
         rewrite_expr(s->ret_value);
-        for (const auto& el : s->elifs) rewrite_expr(el.first);
+        for (const auto& el : s->aux().elifs) rewrite_expr(el.first);
         each_child_stmt(s, [this](const StmtPtr& c) { rewrite_stmt(c); });
     }
 
     void rewrite_expr(const ExprPtr& e) {
         if (!e) return;
-        if (e->kind == ExprKind::Call && e->callee && e->callee->kind == ExprKind::Member && e->callee->object &&
-            e->callee->object->kind == ExprKind::Ident && aliases_.count(e->callee->object->name) &&
-            math_whitelist().count(e->callee->name) && !declared_.count(e->callee->name)) {
-            ExprPtr bare = make_expr(ExprKind::Ident, e->callee->tok);
-            bare->name = e->callee->name;
-            saved_.emplace_back(e.get(), e->callee);
-            e->callee = bare;
+        if (e->kind == ExprKind::Call && e->kids().callee && e->kids().callee->kind == ExprKind::Member && e->kids().callee->kids().object &&
+            e->kids().callee->kids().object->kind == ExprKind::Ident && aliases_.count(e->kids().callee->kids().object->name) &&
+            (math_whitelist().count(e->kids().callee->name) || e->kids().callee->name == "len") && !declared_.count(e->kids().callee->name)) {
+            ExprPtr bare = make_expr(ExprKind::Ident, e->kids().callee->tok);
+            bare->name = e->kids().callee->name == "len" ? std::string(kLenCall) : e->kids().callee->name;
+            saved_.emplace_back(e.get(), e->kids().callee);
+            e->kids_mut().callee = bare;
         }
         each_child_expr(e, [this](const ExprPtr& c) { rewrite_expr(c); });
     }
@@ -3425,4 +4180,3 @@ std::string format_native_report(const NativeReport& r) {
 }
 
 }
-

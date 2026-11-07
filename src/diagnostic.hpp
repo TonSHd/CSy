@@ -15,6 +15,8 @@ struct Diagnostic {
     int col;
     std::string message;
     std::vector<std::string> notes;
+    int length = 1;
+    std::vector<std::string> trail;
 };
 
 class DiagBag {
@@ -22,22 +24,25 @@ public:
     static constexpr size_t kMaxStoredErrors = 100;
     static constexpr size_t kMaxStoredWarnings = 200;
 
-    void error(const std::string& file, int line, int col, const std::string& msg) {
+    void error(const std::string& file, int line, int col, const std::string& msg, int length = 1) {
         ++errors_;
         if (stored_errors_ >= kMaxStoredErrors) { last_stored_ = false; ++suppressed_; return; }
         ++stored_errors_;
         last_stored_ = true;
-        diags_.push_back(Diagnostic{Diagnostic::Error, file, line, col, msg, {}});
+        diags_.push_back(Diagnostic{Diagnostic::Error, file, line, col, msg, {}, length, {}});
     }
-    void warn(const std::string& file, int line, int col, const std::string& msg) {
+    void warn(const std::string& file, int line, int col, const std::string& msg, int length = 1) {
         ++warnings_;
         if (stored_warnings_ >= kMaxStoredWarnings) { last_stored_ = false; ++suppressed_; return; }
         ++stored_warnings_;
         last_stored_ = true;
-        diags_.push_back(Diagnostic{Diagnostic::Warning, file, line, col, msg, {}});
+        diags_.push_back(Diagnostic{Diagnostic::Warning, file, line, col, msg, {}, length, {}});
     }
     void note(const std::string& msg) {
         if (last_stored_ && !diags_.empty()) diags_.back().notes.push_back(msg);
+    }
+    void trail(const std::string& step) {
+        if (last_stored_ && !diags_.empty()) diags_.back().trail.push_back(step);
     }
     bool has_errors() const { return errors_ > 0; }
     bool error_limit_reached() const { return errors_ >= kMaxStoredErrors; }
